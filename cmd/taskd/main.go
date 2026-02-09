@@ -5,11 +5,16 @@ import (
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sandeepkv93/taskd/internal/scheduler"
 	"github.com/sandeepkv93/taskd/internal/update"
 )
 
 func main() {
-	program := tea.NewProgram(update.NewModel())
+	reminderEngine := scheduler.NewEngine(64)
+	reminderEngine.Start()
+	defer reminderEngine.Stop()
+
+	program := tea.NewProgram(update.NewModelWithScheduler(reminderEngine))
 	if _, err := program.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "taskd failed: %v\n", err)
 		os.Exit(1)

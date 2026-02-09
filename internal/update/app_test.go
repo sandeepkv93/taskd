@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sandeepkv93/taskd/internal/scheduler"
 )
 
 func TestNewModelDefaults(t *testing.T) {
@@ -375,5 +376,34 @@ func TestFocusViewRendering(t *testing.T) {
 	}
 	if !strings.Contains(out, "pomodoros completed: 2") {
 		t.Fatalf("expected pomodoro count in output, got %q", out)
+	}
+}
+
+func TestInitWithSchedulerReturnsReminderCmd(t *testing.T) {
+	engine := scheduler.NewEngine(1)
+	m := NewModelWithScheduler(engine)
+	if cmd := m.Init(); cmd == nil {
+		t.Fatal("expected reminder wait cmd when scheduler is attached")
+	}
+}
+
+func TestUpdateReminderDueMsgAppendsLogAndRearms(t *testing.T) {
+	engine := scheduler.NewEngine(1)
+	m := NewModelWithScheduler(engine)
+	ev := scheduler.ReminderEvent{
+		ID:        "rem-1",
+		TriggerAt: time.Date(2026, 2, 9, 12, 0, 0, 0, time.UTC),
+	}
+
+	updated, cmd := m.Update(ReminderDueMsg{Event: ev})
+	next := updated.(Model)
+	if len(next.ReminderLog) != 1 || next.ReminderLog[0].ID != "rem-1" {
+		t.Fatalf("unexpected reminder log: %#v", next.ReminderLog)
+	}
+	if cmd == nil {
+		t.Fatal("expected reminder listener rearm cmd")
+	}
+	if !strings.Contains(next.Status.Text, "reminder fired") {
+		t.Fatalf("expected reminder status text, got %q", next.Status.Text)
 	}
 }

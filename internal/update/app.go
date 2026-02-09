@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sandeepkv93/taskd/internal/scheduler"
 )
 
 type View string
@@ -54,6 +55,8 @@ type Model struct {
 	Today          TodayState
 	Calendar       CalendarState
 	Focus          FocusState
+	Scheduler      *scheduler.Engine
+	ReminderLog    []scheduler.ReminderEvent
 	Status         StatusBar
 	Keys           GlobalKeyMap
 	Quitting       bool
@@ -177,6 +180,10 @@ type SetCalendarItemsMsg struct {
 
 type FocusTickMsg struct{}
 
+type ReminderDueMsg struct {
+	Event scheduler.ReminderEvent
+}
+
 func NewModel() Model {
 	return Model{
 		CurrentView: ViewToday,
@@ -241,7 +248,16 @@ func NewModel() Model {
 	}
 }
 
+func NewModelWithScheduler(engine *scheduler.Engine) Model {
+	m := NewModel()
+	m.Scheduler = engine
+	return m
+}
+
 func (m Model) Init() tea.Cmd {
+	if m.Scheduler != nil {
+		return waitForReminderCmd(m.Scheduler.C())
+	}
 	return nil
 }
 
@@ -323,6 +339,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case FocusTickMsg:
 		return m.onFocusTick()
+	case ReminderDueMsg:
+		m.ReminderLog = append(m.ReminderLog, typed.Event)
+		if len(m.ReminderLog) > 20 {
+			m.ReminderLog = m.ReminderLog[len(m.ReminderLog)-20:]
+		}
+		m.Status = StatusBar{
+			Text:    fmt.Sprintf("reminder fired: %s", typed.Event.ID),
+			IsError: false,
+		}
+		if m.Scheduler != nil {
+			return m, waitForReminderCmd(m.Scheduler.C())
+		}
+		return m, nil
 	}
 
 	return m, nil
@@ -353,8 +382,13 @@ func (m Model) View() string {
 	if m.CurrentView == ViewFocus {
 		focusView = m.renderFocusView()
 	}
+	reminderView := ""
+	if len(m.ReminderLog) > 0 {
+		last := m.ReminderLog[len(m.ReminderLog)-1]
+		reminderView = fmt.Sprintf("\nlast-reminder: %s @ %s", last.ID, last.TriggerAt.Format("15:04:05"))
+	}
 	return fmt.Sprintf(
-		"taskd | view: %s | selected: %s\nkeys: [%s]today [%s]inbox [%s]calendar [%s]focus [%s]quit%s%s%s%s%s",
+		"taskd | view: %s | selected: %s\nkeys: [%s]today [%s]inbox [%s]calendar [%s]focus [%s]quit%s%s%s%s%s%s",
 		m.CurrentView,
 		m.SelectedTaskID,
 		m.Keys.Today,
@@ -367,6 +401,7 @@ func (m Model) View() string {
 		todayView,
 		calendarView,
 		focusView,
+		reminderView,
 	)
 }
 
@@ -887,6 +922,19 @@ func (m Model) currentFocusTotal() int {
 
 func focusTickCmd() tea.Cmd {
 	return tea.Tick(time.Second, func(time.Time) tea.Msg { return FocusTickMsg{} })
+}
+
+func waitForReminderCmd(ch <-chan scheduler.ReminderEvent) tea.Cmd {
+	if ch == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		ev, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return ReminderDueMsg{Event: ev}
+	}
 }
 
 func formatDuration(totalSec int) string {
