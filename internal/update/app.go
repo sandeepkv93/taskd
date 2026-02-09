@@ -53,6 +53,7 @@ type Model struct {
 	Inbox          InboxState
 	Today          TodayState
 	Calendar       CalendarState
+	Focus          FocusState
 	Status         StatusBar
 	Keys           GlobalKeyMap
 	Quitting       bool
@@ -121,6 +122,24 @@ type CalendarState struct {
 	Cursor    int
 }
 
+type FocusPhase string
+
+const (
+	FocusPhaseWork  FocusPhase = "work"
+	FocusPhaseBreak FocusPhase = "break"
+)
+
+type FocusState struct {
+	TaskID             string
+	TaskTitle          string
+	WorkDurationSec    int
+	BreakDurationSec   int
+	RemainingSec       int
+	Running            bool
+	Phase              FocusPhase
+	CompletedPomodoros int
+}
+
 type SwitchViewMsg struct {
 	View View
 }
@@ -155,6 +174,8 @@ type SetTodayItemsMsg struct {
 type SetCalendarItemsMsg struct {
 	Items []AgendaItem
 }
+
+type FocusTickMsg struct{}
 
 func NewModel() Model {
 	return Model{
@@ -203,6 +224,12 @@ func NewModel() Model {
 				{ID: "ag-3", Title: "Gym", Date: "2026-02-10", Time: "18:30", Kind: "event"},
 			},
 		},
+		Focus: FocusState{
+			WorkDurationSec:  25 * 60,
+			BreakDurationSec: 5 * 60,
+			RemainingSec:     25 * 60,
+			Phase:            FocusPhaseWork,
+		},
 		Keys: GlobalKeyMap{
 			Today:    "1",
 			Inbox:    "2",
@@ -236,6 +263,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case m.Keys.Focus:
 			m.CurrentView = ViewFocus
+			m.bootstrapFocusTask()
 			return m, nil
 		case "ctrl+c", m.Keys.Quit:
 			m.Quitting = true
@@ -250,9 +278,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.CurrentView == ViewCalendar {
 			return m.handleCalendarKey(typed), nil
 		}
+		if m.CurrentView == ViewFocus {
+			next, cmd := m.handleFocusKey(typed)
+			return next, cmd
+		}
 	case SwitchViewMsg:
 		if isKnownView(typed.View) {
 			m.CurrentView = typed.View
+			if typed.View == ViewFocus {
+				m.bootstrapFocusTask()
+			}
 		}
 		return m, nil
 	case SetStatusMsg:
@@ -286,6 +321,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Calendar.Cursor = 0
 		m.syncSelectedTaskToCalendarCursor()
 		return m, nil
+	case FocusTickMsg:
+		return m.onFocusTick()
 	}
 
 	return m, nil
@@ -312,8 +349,12 @@ func (m Model) View() string {
 	if m.CurrentView == ViewCalendar {
 		calendarView = m.renderCalendarView()
 	}
+	focusView := ""
+	if m.CurrentView == ViewFocus {
+		focusView = m.renderFocusView()
+	}
 	return fmt.Sprintf(
-		"taskd | view: %s | selected: %s\nkeys: [%s]today [%s]inbox [%s]calendar [%s]focus [%s]quit%s%s%s%s",
+		"taskd | view: %s | selected: %s\nkeys: [%s]today [%s]inbox [%s]calendar [%s]focus [%s]quit%s%s%s%s%s",
 		m.CurrentView,
 		m.SelectedTaskID,
 		m.Keys.Today,
@@ -325,6 +366,7 @@ func (m Model) View() string {
 		inboxView,
 		todayView,
 		calendarView,
+		focusView,
 	)
 }
 
@@ -453,6 +495,51 @@ func (m Model) handleCalendarKey(msg tea.KeyMsg) Model {
 		m.syncSelectedTaskToCalendarCursor()
 	}
 	return m
+}
+
+func (m Model) handleFocusKey(msg tea.KeyMsg) (Model, tea.Cmd) {
+	switch msg.String() {
+	case " ":
+		if m.Focus.Running {
+			m.Focus.Running = false
+			m.Status = StatusBar{Text: "focus paused", IsError: false}
+			return m, nil
+		}
+		if m.Focus.RemainingSec <= 0 {
+			m.Focus.RemainingSec = m.currentFocusTotal()
+		}
+		m.Focus.Running = true
+		m.Status = StatusBar{Text: "focus running", IsError: false}
+		return m, focusTickCmd()
+	case "r":
+		m.Focus.Running = false
+		m.Focus.RemainingSec = m.currentFocusTotal()
+		m.Status = StatusBar{Text: "focus reset", IsError: false}
+		return m, nil
+	case "n":
+		m.completeFocusPhase()
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m Model) onFocusTick() (tea.Model, tea.Cmd) {
+	if !m.Focus.Running {
+		return m, nil
+	}
+	if m.Focus.RemainingSec > 0 {
+		m.Focus.RemainingSec--
+	}
+	if m.Focus.RemainingSec == 0 {
+		m.Focus.Running = false
+		if m.Focus.Phase == FocusPhaseWork {
+			m.Status = StatusBar{Text: "work session complete; press n to start break", IsError: false}
+		} else {
+			m.Status = StatusBar{Text: "break complete; press n for next focus block", IsError: false}
+		}
+		return m, nil
+	}
+	return m, focusTickCmd()
 }
 
 func (m *Model) shiftCalendarFocus(delta int) {
@@ -665,6 +752,31 @@ func (m Model) renderCalendarView() string {
 	return strings.TrimSuffix(b.String(), "\n")
 }
 
+func (m Model) renderFocusView() string {
+	total := m.currentFocusTotal()
+	progress := 0.0
+	if total > 0 {
+		progress = float64(total-m.Focus.RemainingSec) / float64(total)
+	}
+
+	var b strings.Builder
+	b.WriteString("\nfocus:\n")
+	if m.Focus.TaskTitle != "" {
+		b.WriteString(fmt.Sprintf("task: %s\n", m.Focus.TaskTitle))
+	} else {
+		b.WriteString("task: (none selected)\n")
+	}
+	b.WriteString(fmt.Sprintf("phase: %s\n", strings.ToUpper(string(m.Focus.Phase))))
+	b.WriteString(fmt.Sprintf("timer: %s\n", formatDuration(m.Focus.RemainingSec)))
+	b.WriteString(fmt.Sprintf("progress: %s %.0f%%\n", progressBar(progress, 20), progress*100))
+	b.WriteString(fmt.Sprintf("pomodoros completed: %d\n", m.Focus.CompletedPomodoros))
+	b.WriteString("actions: [space]start/pause [r]reset [n]next-phase\n")
+	if m.Focus.RemainingSec == 0 {
+		b.WriteString("prompt: session ended, press [n] to continue")
+	}
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
 func renderTodaySection(b *strings.Builder, title string, items []TodayItem, state TodayState) {
 	b.WriteString(fmt.Sprintf("\n%s:\n", title))
 	if len(items) == 0 {
@@ -734,6 +846,70 @@ func (m Model) currentAgendaItem() (AgendaItem, bool) {
 		return AgendaItem{}, false
 	}
 	return m.Calendar.Items[m.Calendar.Cursor], true
+}
+
+func (m *Model) bootstrapFocusTask() {
+	if m.Focus.TaskID != "" {
+		return
+	}
+	m.Focus.TaskID = m.SelectedTaskID
+	if item, ok := m.currentTodayItem(); ok {
+		m.Focus.TaskID = item.ID
+		m.Focus.TaskTitle = item.Title
+		return
+	}
+	if m.Focus.TaskID != "" {
+		m.Focus.TaskTitle = m.Focus.TaskID
+	}
+}
+
+func (m *Model) completeFocusPhase() {
+	if m.Focus.Phase == FocusPhaseWork {
+		m.Focus.CompletedPomodoros++
+		m.Focus.Phase = FocusPhaseBreak
+		m.Focus.RemainingSec = m.Focus.BreakDurationSec
+		m.Focus.Running = false
+		m.Status = StatusBar{Text: "break ready", IsError: false}
+		return
+	}
+	m.Focus.Phase = FocusPhaseWork
+	m.Focus.RemainingSec = m.Focus.WorkDurationSec
+	m.Focus.Running = false
+	m.Status = StatusBar{Text: "focus block ready", IsError: false}
+}
+
+func (m Model) currentFocusTotal() int {
+	if m.Focus.Phase == FocusPhaseBreak {
+		return m.Focus.BreakDurationSec
+	}
+	return m.Focus.WorkDurationSec
+}
+
+func focusTickCmd() tea.Cmd {
+	return tea.Tick(time.Second, func(time.Time) tea.Msg { return FocusTickMsg{} })
+}
+
+func formatDuration(totalSec int) string {
+	if totalSec < 0 {
+		totalSec = 0
+	}
+	min := totalSec / 60
+	sec := totalSec % 60
+	return fmt.Sprintf("%02d:%02d", min, sec)
+}
+
+func progressBar(progress float64, width int) string {
+	if progress < 0 {
+		progress = 0
+	}
+	if progress > 1 {
+		progress = 1
+	}
+	filled := int(progress * float64(width))
+	if filled > width {
+		filled = width
+	}
+	return "[" + strings.Repeat("#", filled) + strings.Repeat("-", width-filled) + "]"
 }
 
 func calendarCursorItem(state CalendarState, id string) bool {

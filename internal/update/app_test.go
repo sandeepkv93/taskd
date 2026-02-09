@@ -277,3 +277,103 @@ func TestCalendarAgendaGroupingAndCursorSelection(t *testing.T) {
 		t.Fatalf("expected selected c2, got %q", next.SelectedTaskID)
 	}
 }
+
+func TestFocusStartPauseTickAndCompletion(t *testing.T) {
+	m := NewModel()
+	m.CurrentView = ViewFocus
+	m.Focus.WorkDurationSec = 3
+	m.Focus.BreakDurationSec = 2
+	m.Focus.RemainingSec = 3
+	m.Focus.Phase = FocusPhaseWork
+	m.Focus.Running = false
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	next := updated.(Model)
+	if !next.Focus.Running {
+		t.Fatal("expected focus running after start")
+	}
+	if cmd == nil {
+		t.Fatal("expected tick cmd on focus start")
+	}
+
+	updated, cmd = next.Update(FocusTickMsg{})
+	next = updated.(Model)
+	if next.Focus.RemainingSec != 2 {
+		t.Fatalf("expected remaining 2, got %d", next.Focus.RemainingSec)
+	}
+	if cmd == nil {
+		t.Fatal("expected tick cmd while timer running")
+	}
+
+	updated, _ = next.Update(FocusTickMsg{})
+	next = updated.(Model)
+	updated, _ = next.Update(FocusTickMsg{})
+	next = updated.(Model)
+	if next.Focus.RemainingSec != 0 {
+		t.Fatalf("expected remaining 0, got %d", next.Focus.RemainingSec)
+	}
+	if next.Focus.Running {
+		t.Fatal("expected focus stopped on completion")
+	}
+	if !strings.Contains(next.Status.Text, "work session complete") {
+		t.Fatalf("expected completion prompt, got %q", next.Status.Text)
+	}
+}
+
+func TestFocusPhaseTransitionWithNextKey(t *testing.T) {
+	m := NewModel()
+	m.CurrentView = ViewFocus
+	m.Focus.WorkDurationSec = 5
+	m.Focus.BreakDurationSec = 2
+	m.Focus.RemainingSec = 0
+	m.Focus.Phase = FocusPhaseWork
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	next := updated.(Model)
+	if next.Focus.Phase != FocusPhaseBreak {
+		t.Fatalf("expected break phase, got %q", next.Focus.Phase)
+	}
+	if next.Focus.RemainingSec != 2 {
+		t.Fatalf("expected break remaining 2, got %d", next.Focus.RemainingSec)
+	}
+	if next.Focus.CompletedPomodoros != 1 {
+		t.Fatalf("expected completed pomodoros 1, got %d", next.Focus.CompletedPomodoros)
+	}
+
+	next.Focus.RemainingSec = 0
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	next = updated.(Model)
+	if next.Focus.Phase != FocusPhaseWork {
+		t.Fatalf("expected work phase, got %q", next.Focus.Phase)
+	}
+	if next.Focus.RemainingSec != 5 {
+		t.Fatalf("expected work remaining 5, got %d", next.Focus.RemainingSec)
+	}
+}
+
+func TestFocusViewRendering(t *testing.T) {
+	m := NewModel()
+	m.CurrentView = ViewFocus
+	m.Focus.TaskTitle = "Write integration tests"
+	m.Focus.Phase = FocusPhaseWork
+	m.Focus.WorkDurationSec = 10
+	m.Focus.RemainingSec = 5
+	m.Focus.CompletedPomodoros = 2
+
+	out := m.View()
+	if !strings.Contains(out, "focus:") {
+		t.Fatalf("expected focus section, got %q", out)
+	}
+	if !strings.Contains(out, "task: Write integration tests") {
+		t.Fatalf("expected focus task title, got %q", out)
+	}
+	if !strings.Contains(out, "phase: WORK") {
+		t.Fatalf("expected phase in output, got %q", out)
+	}
+	if !strings.Contains(out, "timer: 00:05") {
+		t.Fatalf("expected timer in output, got %q", out)
+	}
+	if !strings.Contains(out, "pomodoros completed: 2") {
+		t.Fatalf("expected pomodoro count in output, got %q", out)
+	}
+}
