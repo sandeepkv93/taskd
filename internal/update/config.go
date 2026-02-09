@@ -12,6 +12,7 @@ type RuntimeConfig struct {
 	FocusBreakMinutes         int
 	ProductivityAvailableMins int
 	SchedulerBuffer           int
+	CompletionStatePath       string
 }
 
 func DefaultRuntimeConfig() RuntimeConfig {
@@ -21,6 +22,7 @@ func DefaultRuntimeConfig() RuntimeConfig {
 		FocusBreakMinutes:         5,
 		ProductivityAvailableMins: 60,
 		SchedulerBuffer:           64,
+		CompletionStatePath:       ".taskd_state.json",
 	}
 }
 
@@ -41,7 +43,18 @@ func RuntimeConfigFromEnv(base RuntimeConfig) RuntimeConfig {
 	if v, ok := getEnvInt("TASKD_SCHEDULER_BUFFER"); ok && v > 0 {
 		cfg.SchedulerBuffer = v
 	}
+	if v, ok := getEnvString("TASKD_STATE_FILE"); ok {
+		cfg.CompletionStatePath = v
+	}
 	return cfg
+}
+
+func getEnvString(name string) (string, bool) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return "", false
+	}
+	return raw, true
 }
 
 func getEnvInt(name string) (int, bool) {

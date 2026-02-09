@@ -2,6 +2,8 @@ package update
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -703,5 +705,58 @@ func TestProductivityViewIncludesDebtAndSuggestions(t *testing.T) {
 	}
 	if !strings.Contains(out, "suggestions:") {
 		t.Fatalf("expected suggestions in output: %q", out)
+	}
+}
+
+func TestCompletedTaskStatePersistsAndReloads(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	cfg := DefaultRuntimeConfig()
+	cfg.CompletionStatePath = statePath
+	m := NewModelWithConfig(nil, nil, cfg)
+	m.Focus.TaskID = "task-a"
+	m.Focus.Phase = FocusPhaseWork
+	m.completeFocusPhase()
+
+	raw, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("expected state file to be written, got err: %v", err)
+	}
+	if !strings.Contains(string(raw), "task-a") {
+		t.Fatalf("expected persisted task id in state file, got: %s", string(raw))
+	}
+
+	loaded := NewModelWithConfig(nil, nil, cfg)
+	if !loaded.CompletedTasks["task-a"] {
+		t.Fatalf("expected completed task to reload from state file, got %#v", loaded.CompletedTasks)
+	}
+}
+
+func TestNaggingReminderSkipsRescheduleWhenCompletedTaskLoaded(t *testing.T) {
+	engine := scheduler.NewEngine(4)
+	engine.Start()
+	defer engine.Stop()
+
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(statePath, []byte("{\"completed_task_ids\":[\"task-complete\"]}\n"), 0o644); err != nil {
+		t.Fatalf("seed state write failed: %v", err)
+	}
+
+	cfg := DefaultRuntimeConfig()
+	cfg.CompletionStatePath = statePath
+	m := NewModelWithConfig(engine, nil, cfg)
+
+	now := time.Now().UTC()
+	ev := scheduler.ReminderEvent{
+		ID:        "nag-1",
+		TaskID:    "task-complete",
+		Type:      "Nagging",
+		TriggerAt: now,
+	}
+	m.applyReminderBehavior(ev, now)
+
+	select {
+	case got := <-engine.C():
+		t.Fatalf("unexpected nagging reschedule for completed task: %#v", got)
+	case <-time.After(250 * time.Millisecond):
 	}
 }
