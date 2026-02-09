@@ -1716,38 +1716,159 @@ func (m *Model) rescheduleReminder(ev scheduler.ReminderEvent, next time.Time) {
 }
 
 func inContextualWindowForRule(now time.Time, rule string) bool {
-	needsWeekend := strings.Contains(strings.ToLower(rule), "weekend")
-	needsEvening := strings.Contains(strings.ToLower(rule), "evening")
-	if !needsWeekend && !needsEvening {
-		needsEvening = true
+	cfg := parseContextualRule(rule)
+	if !cfg.allowsWeekday(now.Weekday()) {
+		return false
 	}
-	if needsWeekend {
-		w := now.Weekday()
-		if w != time.Saturday && w != time.Sunday {
-			return false
-		}
-	}
-	if needsEvening {
-		h := now.Hour()
-		if h < 18 || h >= 22 {
-			return false
-		}
-	}
-	return true
+	return cfg.inWindow(now)
 }
 
 func nextContextualWindowStartForRule(now time.Time, rule string) time.Time {
+	cfg := parseContextualRule(rule)
 	loc := now.Location()
-	next := now
-	for i := 0; i < 14; i++ {
-		y, mo, d := next.Date()
-		candidate := time.Date(y, mo, d, 18, 0, 0, 0, loc)
-		if candidate.After(now) && inContextualWindowForRule(candidate.Add(30*time.Minute), rule) {
-			return candidate
+	for i := 0; i < 30; i++ {
+		day := now.AddDate(0, 0, i)
+		if !cfg.allowsWeekday(day.Weekday()) {
+			continue
 		}
-		next = next.AddDate(0, 0, 1)
+		y, mo, d := day.Date()
+		for _, w := range cfg.windows {
+			candidate := time.Date(y, mo, d, w.StartHour, 0, 0, 0, loc)
+			if candidate.After(now) {
+				return candidate
+			}
+		}
 	}
 	return now.Add(24 * time.Hour)
+}
+
+type contextualWindow struct {
+	StartHour int
+	EndHour   int
+}
+
+type contextualRule struct {
+	windows []contextualWindow
+	days    map[time.Weekday]bool
+}
+
+func parseContextualRule(raw string) contextualRule {
+	rule := contextualRule{
+		windows: []contextualWindow{{StartHour: 18, EndHour: 22}}, // default: evening
+	}
+	normalized := strings.ToLower(strings.TrimSpace(raw))
+	if normalized == "" {
+		return rule
+	}
+
+	parts := strings.FieldsFunc(normalized, func(r rune) bool {
+		return r == ';' || r == '|'
+	})
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if strings.HasPrefix(part, "window=") {
+			val := strings.TrimSpace(strings.TrimPrefix(part, "window="))
+			if parsed := parseContextualWindows(val); len(parsed) > 0 {
+				rule.windows = parsed
+			}
+			continue
+		}
+		if strings.HasPrefix(part, "days=") {
+			val := strings.TrimSpace(strings.TrimPrefix(part, "days="))
+			if parsed := parseContextualDays(val); len(parsed) > 0 {
+				rule.days = parsed
+			}
+			continue
+		}
+	}
+
+	// Backward-compatible keyword parsing for simpler rules.
+	if strings.Contains(normalized, "morning") {
+		rule.windows = []contextualWindow{{StartHour: 8, EndHour: 12}}
+	}
+	if strings.Contains(normalized, "afternoon") {
+		rule.windows = []contextualWindow{{StartHour: 12, EndHour: 17}}
+	}
+	if strings.Contains(normalized, "evening") {
+		rule.windows = []contextualWindow{{StartHour: 18, EndHour: 22}}
+	}
+	if strings.Contains(normalized, "weekend") {
+		rule.days = map[time.Weekday]bool{time.Saturday: true, time.Sunday: true}
+	}
+	if strings.Contains(normalized, "weekday") {
+		rule.days = map[time.Weekday]bool{
+			time.Monday: true, time.Tuesday: true, time.Wednesday: true, time.Thursday: true, time.Friday: true,
+		}
+	}
+
+	return rule
+}
+
+func parseContextualWindows(raw string) []contextualWindow {
+	out := make([]contextualWindow, 0, 2)
+	for _, token := range strings.Split(raw, ",") {
+		switch strings.TrimSpace(token) {
+		case "morning":
+			out = append(out, contextualWindow{StartHour: 8, EndHour: 12})
+		case "afternoon":
+			out = append(out, contextualWindow{StartHour: 12, EndHour: 17})
+		case "evening":
+			out = append(out, contextualWindow{StartHour: 18, EndHour: 22})
+		}
+	}
+	return out
+}
+
+func parseContextualDays(raw string) map[time.Weekday]bool {
+	parsed := make(map[time.Weekday]bool)
+	for _, token := range strings.Split(raw, ",") {
+		switch strings.TrimSpace(token) {
+		case "weekdays", "weekday":
+			parsed[time.Monday] = true
+			parsed[time.Tuesday] = true
+			parsed[time.Wednesday] = true
+			parsed[time.Thursday] = true
+			parsed[time.Friday] = true
+		case "weekends", "weekend":
+			parsed[time.Saturday] = true
+			parsed[time.Sunday] = true
+		case "mon", "monday":
+			parsed[time.Monday] = true
+		case "tue", "tuesday":
+			parsed[time.Tuesday] = true
+		case "wed", "wednesday":
+			parsed[time.Wednesday] = true
+		case "thu", "thursday":
+			parsed[time.Thursday] = true
+		case "fri", "friday":
+			parsed[time.Friday] = true
+		case "sat", "saturday":
+			parsed[time.Saturday] = true
+		case "sun", "sunday":
+			parsed[time.Sunday] = true
+		}
+	}
+	return parsed
+}
+
+func (r contextualRule) allowsWeekday(d time.Weekday) bool {
+	if len(r.days) == 0 {
+		return true
+	}
+	return r.days[d]
+}
+
+func (r contextualRule) inWindow(now time.Time) bool {
+	h := now.Hour()
+	for _, w := range r.windows {
+		if h >= w.StartHour && h < w.EndHour {
+			return true
+		}
+	}
+	return false
 }
 
 func (m Model) isTaskCompleted(taskID string) bool {

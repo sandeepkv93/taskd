@@ -485,6 +485,43 @@ func TestReminderBehaviorContextualWindowAndDeferral(t *testing.T) {
 	}
 }
 
+func TestContextualRuleWeekdayMorning(t *testing.T) {
+	m := NewModel()
+	rule := "window=morning;days=weekdays"
+	inWindow := time.Date(2026, 2, 10, 9, 0, 0, 0, time.UTC) // Tuesday
+	if !inContextualWindowForRule(inWindow, rule) {
+		t.Fatalf("expected in-window for rule %q at %s", rule, inWindow)
+	}
+
+	outWindow := time.Date(2026, 2, 14, 10, 0, 0, 0, time.UTC) // Saturday
+	ev := scheduler.ReminderEvent{ID: "ctx-rule", Type: "Contextual", RepeatRule: rule, TriggerAt: outWindow}
+	m.applyReminderBehavior(ev, outWindow)
+	if !strings.Contains(m.Status.Text, "contextual deferred") {
+		t.Fatalf("expected deferred contextual status, got %q", m.Status.Text)
+	}
+	next := nextContextualWindowStartForRule(outWindow, rule)
+	if next.Weekday() != time.Monday || next.Hour() != 8 {
+		t.Fatalf("expected defer to Monday 08:00, got %s", next.Format(time.RFC3339))
+	}
+}
+
+func TestContextualRuleWeekendEvening(t *testing.T) {
+	rule := "window=evening;days=weekend"
+	inWindow := time.Date(2026, 2, 15, 19, 0, 0, 0, time.UTC) // Sunday
+	if !inContextualWindowForRule(inWindow, rule) {
+		t.Fatalf("expected in-window for weekend-evening rule at %s", inWindow)
+	}
+
+	outWindow := time.Date(2026, 2, 11, 19, 0, 0, 0, time.UTC) // Wednesday
+	if inContextualWindowForRule(outWindow, rule) {
+		t.Fatalf("expected out-of-window for weekend-evening rule at %s", outWindow)
+	}
+	next := nextContextualWindowStartForRule(outWindow, rule)
+	if next.Weekday() != time.Saturday || next.Hour() != 18 {
+		t.Fatalf("expected next Saturday 18:00, got %s", next.Format(time.RFC3339))
+	}
+}
+
 func TestReminderBehaviorNaggingStopsWhenTaskCompleted(t *testing.T) {
 	m := NewModel()
 	now := time.Date(2026, 2, 9, 12, 0, 0, 0, time.UTC)
