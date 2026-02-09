@@ -471,3 +471,72 @@ func TestReminderBehaviorContextualWindowAndDeferral(t *testing.T) {
 		t.Fatalf("expected next contextual start at 18:00, got %s", nextContextualWindowStart(outWindow).Format("15:04"))
 	}
 }
+
+func TestCommandPaletteAddCommand(t *testing.T) {
+	m := NewModel()
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	next := updated.(Model)
+	if !next.Palette.Active {
+		t.Fatal("expected command palette active")
+	}
+
+	for _, r := range []rune("add buy groceries") {
+		updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		next = updated.(Model)
+	}
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(Model)
+
+	if next.Palette.Active {
+		t.Fatal("expected command palette to close after execution")
+	}
+	if next.CurrentView != ViewInbox {
+		t.Fatalf("expected view inbox after add command, got %q", next.CurrentView)
+	}
+	if len(next.Inbox.Items) == 0 || next.Inbox.Items[len(next.Inbox.Items)-1].Title != "buy groceries" {
+		t.Fatalf("expected inbox item from add command, got %#v", next.Inbox.Items)
+	}
+}
+
+func TestCommandPaletteRescheduleSelected(t *testing.T) {
+	m := NewModel()
+	m.CurrentView = ViewInbox
+	m.addInboxItem("one")
+	m.addInboxItem("two")
+	m.Inbox.Selected[m.Inbox.Items[0].ID] = true
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	next := updated.(Model)
+	for _, r := range []rune("reschedule selected next monday") {
+		updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		next = updated.(Model)
+	}
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(Model)
+
+	if next.Inbox.Items[0].ScheduledFor != "next monday" {
+		t.Fatalf("expected selected item rescheduled, got %q", next.Inbox.Items[0].ScheduledFor)
+	}
+	if next.Inbox.Items[1].ScheduledFor != "" {
+		t.Fatalf("expected unselected item unchanged, got %q", next.Inbox.Items[1].ScheduledFor)
+	}
+}
+
+func TestCommandPaletteUnknownCommandSetsError(t *testing.T) {
+	m := NewModel()
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	next := updated.(Model)
+	for _, r := range []rune("unknown command") {
+		updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		next = updated.(Model)
+	}
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(Model)
+
+	if !next.Status.IsError {
+		t.Fatal("expected error status for unknown command")
+	}
+	if !strings.Contains(next.Status.Text, "unknown_command") {
+		t.Fatalf("expected structured error text, got %q", next.Status.Text)
+	}
+}

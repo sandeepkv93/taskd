@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sandeepkv93/taskd/internal/commands"
 	"github.com/sandeepkv93/taskd/internal/scheduler"
 )
 
@@ -59,6 +60,7 @@ type Model struct {
 	ReminderLog    []scheduler.ReminderEvent
 	ReminderAck    map[string]bool
 	SoftFollowedUp map[string]bool
+	Palette        CommandPaletteState
 	Status         StatusBar
 	Keys           GlobalKeyMap
 	Quitting       bool
@@ -143,6 +145,11 @@ type FocusState struct {
 	Running            bool
 	Phase              FocusPhase
 	CompletedPomodoros int
+}
+
+type CommandPaletteState struct {
+	Active bool
+	Input  string
 }
 
 type SwitchViewMsg struct {
@@ -275,7 +282,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ensureInboxState()
 		m.ensureTodayState()
 		m.ensureCalendarState()
+
+		if m.Palette.Active {
+			next := m.handlePaletteKey(typed)
+			return next, nil
+		}
+
 		switch typed.String() {
+		case "/":
+			m.Palette.Active = true
+			m.Palette.Input = ""
+			m.Status = StatusBar{Text: "command palette active", IsError: false}
+			return m, nil
 		case m.Keys.Today:
 			m.CurrentView = ViewToday
 			return m, nil
@@ -398,8 +416,12 @@ func (m Model) View() string {
 		last := m.ReminderLog[len(m.ReminderLog)-1]
 		reminderView = fmt.Sprintf("\nlast-reminder: %s @ %s", last.ID, last.TriggerAt.Format("15:04:05"))
 	}
+	paletteView := ""
+	if m.Palette.Active {
+		paletteView = m.renderCommandPalette()
+	}
 	return fmt.Sprintf(
-		"taskd | view: %s | selected: %s\nkeys: [%s]today [%s]inbox [%s]calendar [%s]focus [%s]quit%s%s%s%s%s%s",
+		"taskd | view: %s | selected: %s\nkeys: [%s]today [%s]inbox [%s]calendar [%s]focus [%s]quit%s%s%s%s%s%s%s",
 		m.CurrentView,
 		m.SelectedTaskID,
 		m.Keys.Today,
@@ -413,6 +435,7 @@ func (m Model) View() string {
 		calendarView,
 		focusView,
 		reminderView,
+		paletteView,
 	)
 }
 
@@ -946,6 +969,96 @@ func waitForReminderCmd(ch <-chan scheduler.ReminderEvent) tea.Cmd {
 		}
 		return ReminderDueMsg{Event: ev}
 	}
+}
+
+func (m Model) handlePaletteKey(msg tea.KeyMsg) Model {
+	switch msg.String() {
+	case "esc":
+		m.Palette.Active = false
+		m.Palette.Input = ""
+		m.Status = StatusBar{Text: "command palette closed", IsError: false}
+	case "enter":
+		m = m.executePaletteCommand()
+	case "backspace":
+		if len(m.Palette.Input) > 0 {
+			m.Palette.Input = m.Palette.Input[:len(m.Palette.Input)-1]
+		}
+	default:
+		if msg.Type == tea.KeyRunes {
+			m.Palette.Input += string(msg.Runes)
+		}
+	}
+	return m
+}
+
+func (m Model) executePaletteCommand() Model {
+	raw := strings.TrimSpace(m.Palette.Input)
+	cmd, err := commands.Parse(raw)
+	if err != nil {
+		m.Status = StatusBar{Text: err.Error(), IsError: true}
+		m.Palette.Active = false
+		m.Palette.Input = ""
+		return m
+	}
+
+	res, err := commands.Execute(cmd, commands.Handlers{
+		Add: func(a commands.AddArgs) (commands.Result, error) {
+			m.CurrentView = ViewInbox
+			m.addInboxItem(a.Title)
+			return commands.Result{Message: fmt.Sprintf("added inbox task: %s", a.Title)}, nil
+		},
+		Snooze: func(s commands.SnoozeArgs) (commands.Result, error) {
+			applied := 0
+			for i := range m.Today.Items {
+				if strings.EqualFold(s.Target, "overdue") && m.Today.Items[i].Bucket == TodayBucketOverdue {
+					m.Today.Items[i].Bucket = TodayBucketAnytime
+					m.Today.Items[i].Notes = strings.TrimSpace(m.Today.Items[i].Notes + " | snoozed " + s.For)
+					applied++
+				}
+			}
+			if applied == 0 {
+				return commands.Result{}, &commands.CommandError{Code: commands.ErrCodeInvalidArgument, Message: "no matching items for snooze target"}
+			}
+			return commands.Result{Message: fmt.Sprintf("snoozed %d task(s) for %s", applied, s.For)}, nil
+		},
+		Show: func(s commands.ShowArgs) (commands.Result, error) {
+			if s.Tag != "" {
+				m.Filter.Tag = s.Tag
+				return commands.Result{Message: fmt.Sprintf("show filter applied: tag=%s", s.Tag)}, nil
+			}
+			return commands.Result{Message: fmt.Sprintf("show %s", s.Subject)}, nil
+		},
+		Reschedule: func(r commands.RescheduleArgs) (commands.Result, error) {
+			if r.Target != "selected" {
+				return commands.Result{}, &commands.CommandError{Code: commands.ErrCodeInvalidArgument, Message: "reschedule currently supports target: selected"}
+			}
+			applied := 0
+			for i := range m.Inbox.Items {
+				item := m.Inbox.Items[i]
+				if m.Inbox.Selected[item.ID] {
+					m.Inbox.Items[i].ScheduledFor = r.When
+					applied++
+				}
+			}
+			if applied == 0 {
+				return commands.Result{}, &commands.CommandError{Code: commands.ErrCodeInvalidArgument, Message: "no selected inbox items to reschedule"}
+			}
+			return commands.Result{Message: fmt.Sprintf("rescheduled %d selected item(s) to %s", applied, r.When)}, nil
+		},
+	})
+	if err != nil {
+		m.Status = StatusBar{Text: err.Error(), IsError: true}
+	} else {
+		m.Status = StatusBar{Text: res.Message, IsError: false}
+	}
+
+	m.Palette.Active = false
+	m.Palette.Input = ""
+	return m
+}
+
+func (m Model) renderCommandPalette() string {
+	return fmt.Sprintf("\ncommand: /%s", m.Palette.Input)
 }
 
 func (m *Model) applyReminderBehavior(ev scheduler.ReminderEvent, now time.Time) {
