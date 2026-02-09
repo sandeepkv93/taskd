@@ -708,6 +708,40 @@ func TestProductivityViewIncludesDebtAndSuggestions(t *testing.T) {
 	}
 }
 
+func TestTodaySectionCollapseToggle(t *testing.T) {
+	m := NewModel()
+	m.CurrentView = ViewToday
+	m.Today.Items = []TodayItem{
+		{ID: "a", Title: "sched", Bucket: TodayBucketScheduled, Priority: "High"},
+		{ID: "b", Title: "any", Bucket: TodayBucketAnytime, Priority: "Low"},
+	}
+	m.Today.Cursor = 0
+	m.syncSelectedTaskToTodayCursor()
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'z'}})
+	next := updated.(Model)
+	if !next.todayCollapsed[TodayBucketScheduled] {
+		t.Fatalf("expected scheduled section to be collapsed")
+	}
+	out := next.View()
+	if !strings.Contains(out, "(collapsed)") {
+		t.Fatalf("expected collapsed marker in today output: %q", out)
+	}
+}
+
+func TestDensityCycleChangesStatus(t *testing.T) {
+	m := NewModel()
+	initial := m.uiDensity
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	next := updated.(Model)
+	if next.uiDensity == initial {
+		t.Fatalf("expected density to change from %d", initial)
+	}
+	if !strings.Contains(next.Status.Text, "density level") {
+		t.Fatalf("expected density status text, got %q", next.Status.Text)
+	}
+}
+
 func TestCompletedTaskStatePersistsAndReloads(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "state.json")
 	cfg := DefaultRuntimeConfig()

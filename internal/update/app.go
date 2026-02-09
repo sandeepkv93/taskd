@@ -103,6 +103,8 @@ type Model struct {
 	stateFilePath string
 	// Recurrence editor (first-pass UI)
 	recurrenceEditor RecurrenceEditorState
+	todayCollapsed   map[TodayBucket]bool
+	uiDensity        int
 }
 
 type InboxItem struct {
@@ -386,6 +388,12 @@ func NewModel() Model {
 			RuleType:     "every_n_days",
 			IntervalText: "1",
 		},
+		todayCollapsed: map[TodayBucket]bool{
+			TodayBucketScheduled: false,
+			TodayBucketAnytime:   false,
+			TodayBucketOverdue:   false,
+		},
+		uiDensity: 1,
 	}
 	m.initBubbleComponents()
 	m.syncBubbleData()
@@ -504,6 +512,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.recurrenceEditor.Err = ""
 				return m, nil
 			}
+		case "z":
+			if m.CurrentView == ViewToday {
+				m.toggleTodaySectionCollapse()
+				return m, nil
+			}
+		case "D":
+			m.cycleDensity()
+			return m, nil
 		case "ctrl+c", m.Keys.Quit:
 			m.Quitting = true
 			return m, tea.Quit
@@ -700,6 +716,13 @@ func (m *Model) initBubbleComponents() {
 }
 
 func (m *Model) syncBubbleData() {
+	listWidth, listHeight, tableHeight, notesHeight, viewportHeight := densityDimensions(m.uiDensity)
+	m.inboxList.SetSize(listWidth, listHeight)
+	m.todayList.SetSize(listWidth, listHeight)
+	m.calendarTable.SetHeight(tableHeight)
+	m.notesArea.SetHeight(notesHeight)
+	m.metaViewport.Height = viewportHeight
+
 	inboxItems := make([]list.Item, 0, len(m.Inbox.Items))
 	for _, item := range m.Inbox.Items {
 		desc := item.ScheduledFor
@@ -764,6 +787,17 @@ func (m *Model) syncBubbleData() {
 	_ = m.focusProgress.SetPercent(pct)
 }
 
+func densityDimensions(level int) (listWidth int, listHeight int, tableHeight int, notesHeight int, viewportHeight int) {
+	switch level {
+	case 2:
+		return 60, 14, 12, 10, 14
+	case 3:
+		return 64, 16, 14, 12, 16
+	default:
+		return 56, 12, 10, 8, 12
+	}
+}
+
 func (m *Model) ensureInboxState() {
 	if m.Inbox.Selected == nil {
 		m.Inbox.Selected = make(map[string]bool)
@@ -774,6 +808,13 @@ func (m *Model) ensureInboxState() {
 }
 
 func (m *Model) ensureTodayState() {
+	if m.todayCollapsed == nil {
+		m.todayCollapsed = map[TodayBucket]bool{
+			TodayBucketScheduled: false,
+			TodayBucketAnytime:   false,
+			TodayBucketOverdue:   false,
+		}
+	}
 	if m.Today.Cursor < 0 {
 		m.Today.Cursor = 0
 	}
@@ -782,6 +823,34 @@ func (m *Model) ensureTodayState() {
 	}
 	if len(m.Today.Items) > 0 && m.SelectedTaskID == "" {
 		m.syncSelectedTaskToTodayCursor()
+	}
+}
+
+func (m *Model) toggleTodaySectionCollapse() {
+	selected, ok := m.currentTodayItem()
+	if !ok {
+		return
+	}
+	bucket := selected.Bucket
+	m.todayCollapsed[bucket] = !m.todayCollapsed[bucket]
+	state := "expanded"
+	if m.todayCollapsed[bucket] {
+		state = "collapsed"
+	}
+	m.Status = StatusBar{
+		Text:    fmt.Sprintf("%s section %s", strings.ToLower(string(bucket)), state),
+		IsError: false,
+	}
+}
+
+func (m *Model) cycleDensity() {
+	m.uiDensity++
+	if m.uiDensity > 3 {
+		m.uiDensity = 1
+	}
+	m.Status = StatusBar{
+		Text:    fmt.Sprintf("density level: %d", m.uiDensity),
+		IsError: false,
 	}
 }
 
@@ -1044,6 +1113,11 @@ func (m Model) renderTodayView() string {
 		ListView:   m.todayList.View(),
 		Items:      items,
 		SelectedID: m.SelectedTaskID,
+		Collapsed: map[string]bool{
+			string(TodayBucketScheduled): m.todayCollapsed[TodayBucketScheduled],
+			string(TodayBucketAnytime):   m.todayCollapsed[TodayBucketAnytime],
+			string(TodayBucketOverdue):   m.todayCollapsed[TodayBucketOverdue],
+		},
 	})
 }
 
@@ -1427,6 +1501,7 @@ func (m Model) globalBindings() []KeyBinding {
 		{Key: m.Keys.Calendar, Action: "switch to Calendar"},
 		{Key: m.Keys.Focus, Action: "switch to Focus"},
 		{Key: "/", Action: "open command palette"},
+		{Key: "D", Action: "cycle density"},
 		{Key: m.Keys.Help, Action: "toggle help panel"},
 		{Key: m.Keys.Quit, Action: "quit app"},
 	}
@@ -1445,6 +1520,7 @@ func (m Model) viewBindings() []KeyBinding {
 	case ViewToday:
 		return []KeyBinding{
 			{Key: "j/k", Action: "move selection"},
+			{Key: "z", Action: "collapse/expand selected section"},
 		}
 	case ViewCalendar:
 		return []KeyBinding{

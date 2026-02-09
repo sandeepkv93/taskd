@@ -24,6 +24,7 @@ type TodayPanelData struct {
 	ListView   string
 	Items      []TodayItemData
 	SelectedID string
+	Collapsed  map[string]bool
 }
 
 type CalendarAgendaItemData struct {
@@ -113,11 +114,11 @@ func RenderTodayPanel(data TodayPanelData) string {
 
 	var b strings.Builder
 	b.WriteString("today:\n")
-	b.WriteString("actions: [j/k]move [1]today [2]inbox [3]calendar [4]focus\n")
+	b.WriteString("actions: [j/k]move [z]collapse [1]today [2]inbox [3]calendar [4]focus\n")
 	b.WriteString(data.ListView + "\n")
-	renderTodaySection(&b, "Scheduled", scheduled, data.SelectedID)
-	renderTodaySection(&b, "Anytime", anytime, data.SelectedID)
-	renderTodaySection(&b, "Overdue", overdue, data.SelectedID)
+	renderTodaySection(&b, "Scheduled", scheduled, data.SelectedID, data.Collapsed["Scheduled"])
+	renderTodaySection(&b, "Anytime", anytime, data.SelectedID, data.Collapsed["Anytime"])
+	renderTodaySection(&b, "Overdue", overdue, data.SelectedID, data.Collapsed["Overdue"])
 	return strings.TrimSpace(b.String())
 }
 
@@ -256,8 +257,16 @@ func RenderRecurrenceEditor(data RecurrenceEditorData) string {
 	return strings.TrimSuffix(b.String(), "\n")
 }
 
-func renderTodaySection(b *strings.Builder, title string, items []TodayItemData, selectedID string) {
-	b.WriteString(fmt.Sprintf("\n%s:\n", title))
+func renderTodaySection(b *strings.Builder, title string, items []TodayItemData, selectedID string, collapsed bool) {
+	marker := "[-]"
+	if collapsed {
+		marker = "[+]"
+	}
+	b.WriteString(fmt.Sprintf("\n%s %s:\n", marker, title))
+	if collapsed {
+		b.WriteString("  (collapsed)\n")
+		return
+	}
 	if len(items) == 0 {
 		b.WriteString("  (none)\n")
 		return
