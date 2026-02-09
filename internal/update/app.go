@@ -2,7 +2,9 @@ package update
 
 import (
 	"fmt"
+	"sort"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -50,6 +52,7 @@ type Model struct {
 	Sort           SortOrder
 	Inbox          InboxState
 	Today          TodayState
+	Calendar       CalendarState
 	Status         StatusBar
 	Keys           GlobalKeyMap
 	Quitting       bool
@@ -95,6 +98,29 @@ type TodayState struct {
 	Cursor int
 }
 
+type CalendarMode string
+
+const (
+	CalendarModeDay   CalendarMode = "day"
+	CalendarModeWeek  CalendarMode = "week"
+	CalendarModeMonth CalendarMode = "month"
+)
+
+type AgendaItem struct {
+	ID    string
+	Title string
+	Date  string
+	Time  string
+	Kind  string
+}
+
+type CalendarState struct {
+	Mode      CalendarMode
+	FocusDate time.Time
+	Items     []AgendaItem
+	Cursor    int
+}
+
 type SwitchViewMsg struct {
 	View View
 }
@@ -124,6 +150,10 @@ type BulkTagInboxMsg struct {
 
 type SetTodayItemsMsg struct {
 	Items []TodayItem
+}
+
+type SetCalendarItemsMsg struct {
+	Items []AgendaItem
 }
 
 func NewModel() Model {
@@ -164,6 +194,15 @@ func NewModel() Model {
 				},
 			},
 		},
+		Calendar: CalendarState{
+			Mode:      CalendarModeWeek,
+			FocusDate: time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC),
+			Items: []AgendaItem{
+				{ID: "ag-1", Title: "Design review", Date: "2026-02-09", Time: "11:00", Kind: "event"},
+				{ID: "ag-2", Title: "Write migration docs", Date: "2026-02-09", Time: "14:00", Kind: "task"},
+				{ID: "ag-3", Title: "Gym", Date: "2026-02-10", Time: "18:30", Kind: "event"},
+			},
+		},
 		Keys: GlobalKeyMap{
 			Today:    "1",
 			Inbox:    "2",
@@ -184,6 +223,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		m.ensureInboxState()
 		m.ensureTodayState()
+		m.ensureCalendarState()
 		switch typed.String() {
 		case m.Keys.Today:
 			m.CurrentView = ViewToday
@@ -206,6 +246,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.CurrentView == ViewToday {
 			return m.handleTodayKey(typed), nil
+		}
+		if m.CurrentView == ViewCalendar {
+			return m.handleCalendarKey(typed), nil
 		}
 	case SwitchViewMsg:
 		if isKnownView(typed.View) {
@@ -238,6 +281,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Today.Cursor = 0
 		m.syncSelectedTaskToTodayCursor()
 		return m, nil
+	case SetCalendarItemsMsg:
+		m.Calendar.Items = typed.Items
+		m.Calendar.Cursor = 0
+		m.syncSelectedTaskToCalendarCursor()
+		return m, nil
 	}
 
 	return m, nil
@@ -260,8 +308,12 @@ func (m Model) View() string {
 	if m.CurrentView == ViewToday {
 		todayView = m.renderTodayView()
 	}
+	calendarView := ""
+	if m.CurrentView == ViewCalendar {
+		calendarView = m.renderCalendarView()
+	}
 	return fmt.Sprintf(
-		"taskd | view: %s | selected: %s\nkeys: [%s]today [%s]inbox [%s]calendar [%s]focus [%s]quit%s%s%s",
+		"taskd | view: %s | selected: %s\nkeys: [%s]today [%s]inbox [%s]calendar [%s]focus [%s]quit%s%s%s%s",
 		m.CurrentView,
 		m.SelectedTaskID,
 		m.Keys.Today,
@@ -272,6 +324,7 @@ func (m Model) View() string {
 		status,
 		inboxView,
 		todayView,
+		calendarView,
 	)
 }
 
@@ -302,6 +355,24 @@ func (m *Model) ensureTodayState() {
 	}
 	if len(m.Today.Items) > 0 && m.SelectedTaskID == "" {
 		m.syncSelectedTaskToTodayCursor()
+	}
+}
+
+func (m *Model) ensureCalendarState() {
+	if m.Calendar.Mode == "" {
+		m.Calendar.Mode = CalendarModeWeek
+	}
+	if m.Calendar.FocusDate.IsZero() {
+		m.Calendar.FocusDate = time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	}
+	if m.Calendar.Cursor < 0 {
+		m.Calendar.Cursor = 0
+	}
+	if m.Calendar.Cursor >= len(m.Calendar.Items) && len(m.Calendar.Items) > 0 {
+		m.Calendar.Cursor = len(m.Calendar.Items) - 1
+	}
+	if len(m.Calendar.Items) > 0 && m.SelectedTaskID == "" {
+		m.syncSelectedTaskToCalendarCursor()
 	}
 }
 
@@ -353,6 +424,50 @@ func (m Model) handleTodayKey(msg tea.KeyMsg) Model {
 		m.syncSelectedTaskToTodayCursor()
 	}
 	return m
+}
+
+func (m Model) handleCalendarKey(msg tea.KeyMsg) Model {
+	switch msg.String() {
+	case "d":
+		m.Calendar.Mode = CalendarModeDay
+		m.Status = StatusBar{Text: "calendar mode: day", IsError: false}
+	case "w":
+		m.Calendar.Mode = CalendarModeWeek
+		m.Status = StatusBar{Text: "calendar mode: week", IsError: false}
+	case "m":
+		m.Calendar.Mode = CalendarModeMonth
+		m.Status = StatusBar{Text: "calendar mode: month", IsError: false}
+	case "h", "left":
+		m.shiftCalendarFocus(-1)
+	case "l", "right":
+		m.shiftCalendarFocus(1)
+	case "up", "k":
+		if m.Calendar.Cursor > 0 {
+			m.Calendar.Cursor--
+		}
+		m.syncSelectedTaskToCalendarCursor()
+	case "down", "j":
+		if m.Calendar.Cursor < len(m.Calendar.Items)-1 {
+			m.Calendar.Cursor++
+		}
+		m.syncSelectedTaskToCalendarCursor()
+	}
+	return m
+}
+
+func (m *Model) shiftCalendarFocus(delta int) {
+	switch m.Calendar.Mode {
+	case CalendarModeDay:
+		m.Calendar.FocusDate = m.Calendar.FocusDate.AddDate(0, 0, delta)
+	case CalendarModeMonth:
+		m.Calendar.FocusDate = m.Calendar.FocusDate.AddDate(0, delta, 0)
+	default:
+		m.Calendar.FocusDate = m.Calendar.FocusDate.AddDate(0, 0, 7*delta)
+	}
+	m.Status = StatusBar{
+		Text:    fmt.Sprintf("calendar focus: %s", m.Calendar.FocusDate.Format("2006-01-02")),
+		IsError: false,
+	}
 }
 
 func (m *Model) addInboxItem(title string) {
@@ -506,6 +621,50 @@ func (m Model) renderTodayView() string {
 	return strings.TrimSuffix(b.String(), "\n")
 }
 
+func (m Model) renderCalendarView() string {
+	var b strings.Builder
+	b.WriteString("\ncalendar:\n")
+	b.WriteString(fmt.Sprintf("mode: %s | focus: %s\n", m.Calendar.Mode, m.Calendar.FocusDate.Format("2006-01-02")))
+	b.WriteString("actions: [d]day [w]week [m]month [h/l]period [j/k]agenda\n")
+
+	grouped := make(map[string][]AgendaItem)
+	keys := make([]string, 0)
+	for _, item := range m.Calendar.Items {
+		if _, ok := grouped[item.Date]; !ok {
+			keys = append(keys, item.Date)
+		}
+		grouped[item.Date] = append(grouped[item.Date], item)
+	}
+	sort.Strings(keys)
+
+	if len(keys) == 0 {
+		b.WriteString("(agenda empty)")
+		return b.String()
+	}
+
+	for _, day := range keys {
+		b.WriteString(fmt.Sprintf("\n%s:\n", day))
+		items := grouped[day]
+		sort.SliceStable(items, func(i, j int) bool { return items[i].Time < items[j].Time })
+		for _, item := range items {
+			cursor := " "
+			if calendarCursorItem(m.Calendar, item.ID) {
+				cursor = ">"
+			}
+			b.WriteString(fmt.Sprintf("%s [%s] %s %s\n", cursor, strings.ToUpper(item.Kind), item.Time, item.Title))
+		}
+	}
+
+	if selected, ok := m.currentAgendaItem(); ok {
+		b.WriteString("\nagenda-metadata:\n")
+		b.WriteString(fmt.Sprintf("id: %s\n", selected.ID))
+		b.WriteString(fmt.Sprintf("kind: %s\n", selected.Kind))
+		b.WriteString(fmt.Sprintf("when: %s %s\n", selected.Date, selected.Time))
+	}
+
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
 func renderTodaySection(b *strings.Builder, title string, items []TodayItem, state TodayState) {
 	b.WriteString(fmt.Sprintf("\n%s:\n", title))
 	if len(items) == 0 {
@@ -559,6 +718,29 @@ func (m Model) currentTodayItem() (TodayItem, bool) {
 		return TodayItem{}, false
 	}
 	return m.Today.Items[m.Today.Cursor], true
+}
+
+func (m *Model) syncSelectedTaskToCalendarCursor() {
+	if selected, ok := m.currentAgendaItem(); ok {
+		m.SelectedTaskID = selected.ID
+	}
+}
+
+func (m Model) currentAgendaItem() (AgendaItem, bool) {
+	if len(m.Calendar.Items) == 0 {
+		return AgendaItem{}, false
+	}
+	if m.Calendar.Cursor < 0 || m.Calendar.Cursor >= len(m.Calendar.Items) {
+		return AgendaItem{}, false
+	}
+	return m.Calendar.Items[m.Calendar.Cursor], true
+}
+
+func calendarCursorItem(state CalendarState, id string) bool {
+	if state.Cursor < 0 || state.Cursor >= len(state.Items) {
+		return false
+	}
+	return state.Items[state.Cursor].ID == id
 }
 
 func contains(items []string, target string) bool {

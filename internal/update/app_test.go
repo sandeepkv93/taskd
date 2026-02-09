@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -209,5 +210,70 @@ func TestTodayKeyNavigationUpdatesSelection(t *testing.T) {
 	}
 	if next.SelectedTaskID != "first" {
 		t.Fatalf("expected selected task first, got %q", next.SelectedTaskID)
+	}
+}
+
+func TestCalendarModeSwitchAndPeriodNavigation(t *testing.T) {
+	m := NewModel()
+	m.CurrentView = ViewCalendar
+	m.Calendar.FocusDate = time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	next := updated.(Model)
+	if next.Calendar.Mode != CalendarModeDay {
+		t.Fatalf("expected day mode, got %q", next.Calendar.Mode)
+	}
+
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	next = updated.(Model)
+	if next.Calendar.FocusDate.Format("2006-01-02") != "2026-02-10" {
+		t.Fatalf("expected +1 day focus, got %s", next.Calendar.FocusDate.Format("2006-01-02"))
+	}
+
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
+	next = updated.(Model)
+	if next.Calendar.Mode != CalendarModeWeek {
+		t.Fatalf("expected week mode, got %q", next.Calendar.Mode)
+	}
+
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
+	next = updated.(Model)
+	if next.Calendar.FocusDate.Format("2006-01-02") != "2026-02-03" {
+		t.Fatalf("expected -7 day focus, got %s", next.Calendar.FocusDate.Format("2006-01-02"))
+	}
+
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	next = updated.(Model)
+	if next.Calendar.Mode != CalendarModeMonth {
+		t.Fatalf("expected month mode, got %q", next.Calendar.Mode)
+	}
+}
+
+func TestCalendarAgendaGroupingAndCursorSelection(t *testing.T) {
+	m := NewModel()
+	m.CurrentView = ViewCalendar
+	m.Calendar.Items = []AgendaItem{
+		{ID: "c1", Title: "A", Date: "2026-02-09", Time: "11:00", Kind: "task"},
+		{ID: "c2", Title: "B", Date: "2026-02-10", Time: "09:00", Kind: "event"},
+		{ID: "c3", Title: "C", Date: "2026-02-10", Time: "17:00", Kind: "task"},
+	}
+	m.Calendar.Cursor = 0
+	m.syncSelectedTaskToCalendarCursor()
+
+	out := m.View()
+	if !strings.Contains(out, "2026-02-09:") || !strings.Contains(out, "2026-02-10:") {
+		t.Fatalf("expected grouped agenda dates in output: %q", out)
+	}
+	if !strings.Contains(out, "agenda-metadata:") || !strings.Contains(out, "id: c1") {
+		t.Fatalf("expected metadata for selected agenda item: %q", out)
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	next := updated.(Model)
+	if next.Calendar.Cursor != 1 {
+		t.Fatalf("expected cursor 1, got %d", next.Calendar.Cursor)
+	}
+	if next.SelectedTaskID != "c2" {
+		t.Fatalf("expected selected c2, got %q", next.SelectedTaskID)
 	}
 }
