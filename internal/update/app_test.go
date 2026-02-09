@@ -103,3 +103,53 @@ func TestViewContainsCoreState(t *testing.T) {
 		t.Fatalf("expected status in output: %q", out)
 	}
 }
+
+func TestInboxQuickAddWithKeyboard(t *testing.T) {
+	m := NewModel()
+	updated, _ := m.Update(SwitchViewMsg{View: ViewInbox})
+	next := updated.(Model)
+
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("write tests")})
+	next = updated.(Model)
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(Model)
+
+	if len(next.Inbox.Items) != 1 {
+		t.Fatalf("expected 1 inbox item, got %d", len(next.Inbox.Items))
+	}
+	if next.Inbox.Items[0].Title != "write tests" {
+		t.Fatalf("unexpected inbox title: %q", next.Inbox.Items[0].Title)
+	}
+	if next.Inbox.Input != "" {
+		t.Fatalf("expected empty input after capture, got %q", next.Inbox.Input)
+	}
+}
+
+func TestInboxBulkSelectScheduleAndTag(t *testing.T) {
+	m := NewModel()
+	m.CurrentView = ViewInbox
+	m.addInboxItem("task one")
+	m.addInboxItem("task two")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	next := updated.(Model)
+	if len(next.Inbox.Selected) != 2 {
+		t.Fatalf("expected 2 selected items, got %d", len(next.Inbox.Selected))
+	}
+
+	updated, _ = next.Update(BulkScheduleInboxMsg{When: "tomorrow 09:00"})
+	next = updated.(Model)
+	for _, item := range next.Inbox.Items {
+		if item.ScheduledFor != "tomorrow 09:00" {
+			t.Fatalf("expected scheduled value for %q, got %q", item.ID, item.ScheduledFor)
+		}
+	}
+
+	updated, _ = next.Update(BulkTagInboxMsg{Tag: "triage"})
+	next = updated.(Model)
+	for _, item := range next.Inbox.Items {
+		if len(item.Tags) != 1 || item.Tags[0] != "triage" {
+			t.Fatalf("expected triage tag on %q, got %#v", item.ID, item.Tags)
+		}
+	}
+}
