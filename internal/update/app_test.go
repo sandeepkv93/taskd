@@ -10,6 +10,17 @@ import (
 	"github.com/sandeepkv93/taskd/internal/scheduler"
 )
 
+type fakeNotifier struct {
+	count int
+	last  Notification
+}
+
+func (f *fakeNotifier) Send(n Notification) error {
+	f.count++
+	f.last = n
+	return nil
+}
+
 func TestNewModelDefaults(t *testing.T) {
 	m := NewModel()
 	if m.CurrentView != ViewToday {
@@ -576,5 +587,42 @@ func TestViewBindingsExistForAllViews(t *testing.T) {
 		if len(bindings) == 0 {
 			t.Fatalf("expected bindings for view %s", view)
 		}
+	}
+}
+
+func TestInTUINotificationOnReminderDue(t *testing.T) {
+	m := NewModel()
+	ev := scheduler.ReminderEvent{ID: "n-1", Type: "Soft", TriggerAt: time.Now().UTC()}
+
+	updated, _ := m.Update(ReminderDueMsg{Event: ev})
+	next := updated.(Model)
+	if len(next.Notifications) == 0 {
+		t.Fatal("expected in-TUI notification to be recorded")
+	}
+	last := next.Notifications[len(next.Notifications)-1]
+	if !strings.Contains(last.Body, "soft reminder") {
+		t.Fatalf("unexpected notification body: %q", last.Body)
+	}
+}
+
+func TestDesktopNotificationOptional(t *testing.T) {
+	f := &fakeNotifier{}
+	m := NewModelWithRuntime(nil, true, f)
+	updated, _ := m.Update(SetStatusMsg{Text: "hello", IsError: false})
+	next := updated.(Model)
+	if f.count == 0 {
+		t.Fatal("expected desktop notifier to be called when enabled")
+	}
+	if !strings.Contains(f.last.Body, "hello") {
+		t.Fatalf("unexpected desktop notification body: %q", f.last.Body)
+	}
+
+	f2 := &fakeNotifier{}
+	m2 := NewModelWithRuntime(nil, false, f2)
+	updated, _ = m2.Update(SetStatusMsg{Text: "hello", IsError: false})
+	next = updated.(Model)
+	_ = next
+	if f2.count != 0 {
+		t.Fatalf("expected desktop notifier not to be called when disabled, got %d", f2.count)
 	}
 }

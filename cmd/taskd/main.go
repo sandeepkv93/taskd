@@ -14,7 +14,11 @@ func main() {
 	reminderEngine.Start()
 	defer reminderEngine.Stop()
 
-	program := tea.NewProgram(update.NewModelWithScheduler(reminderEngine))
+	program := tea.NewProgram(update.NewModelWithRuntime(
+		reminderEngine,
+		update.DesktopNotificationsEnabledFromEnv(),
+		update.ExecDesktopNotifier{},
+	))
 	if _, err := program.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "taskd failed: %v\n", err)
 		os.Exit(1)

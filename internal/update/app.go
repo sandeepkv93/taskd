@@ -2,6 +2,9 @@ package update
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -62,6 +65,9 @@ type Model struct {
 	SoftFollowedUp map[string]bool
 	Palette        CommandPaletteState
 	HelpVisible    bool
+	Notifications  []Notification
+	DesktopEnabled bool
+	notifier       DesktopNotifier
 	Status         StatusBar
 	Keys           GlobalKeyMap
 	Quitting       bool
@@ -156,6 +162,35 @@ type CommandPaletteState struct {
 type KeyBinding struct {
 	Key    string
 	Action string
+}
+
+type Notification struct {
+	Title string
+	Body  string
+	Level string
+	At    time.Time
+}
+
+type DesktopNotifier interface {
+	Send(Notification) error
+}
+
+type NoopDesktopNotifier struct{}
+
+func (NoopDesktopNotifier) Send(Notification) error { return nil }
+
+type ExecDesktopNotifier struct{}
+
+func (ExecDesktopNotifier) Send(n Notification) error {
+	switch runtime.GOOS {
+	case "linux":
+		return exec.Command("notify-send", n.Title, n.Body).Run()
+	case "darwin":
+		script := fmt.Sprintf(`display notification "%s" with title "%s"`, escapeAppleScript(n.Body), escapeAppleScript(n.Title))
+		return exec.Command("osascript", "-e", script).Run()
+	default:
+		return nil
+	}
 }
 
 type SwitchViewMsg struct {
@@ -258,6 +293,8 @@ func NewModel() Model {
 		},
 		ReminderAck:    make(map[string]bool),
 		SoftFollowedUp: make(map[string]bool),
+		DesktopEnabled: false,
+		notifier:       NoopDesktopNotifier{},
 		Keys: GlobalKeyMap{
 			Today:    "1",
 			Inbox:    "2",
@@ -272,6 +309,16 @@ func NewModel() Model {
 func NewModelWithScheduler(engine *scheduler.Engine) Model {
 	m := NewModel()
 	m.Scheduler = engine
+	return m
+}
+
+func NewModelWithRuntime(engine *scheduler.Engine, desktopEnabled bool, notifier DesktopNotifier) Model {
+	m := NewModel()
+	m.Scheduler = engine
+	m.DesktopEnabled = desktopEnabled
+	if notifier != nil {
+		m.notifier = notifier
+	}
 	return m
 }
 
@@ -352,6 +399,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case SetStatusMsg:
 		m.Status = StatusBar{Text: typed.Text, IsError: typed.IsError}
+		m.notify("Status", typed.Text, levelFromError(typed.IsError))
 		return m, nil
 	case ClearStatusMsg:
 		m.Status = StatusBar{}
@@ -360,6 +408,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.LastError = typed.Err
 		if typed.Err != nil {
 			m.Status = StatusBar{Text: typed.Err.Error(), IsError: true}
+			m.notify("Error", typed.Err.Error(), "error")
 		}
 		return m, nil
 	case QuickAddInboxTaskMsg:
@@ -389,6 +438,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ReminderLog = m.ReminderLog[len(m.ReminderLog)-20:]
 		}
 		m.applyReminderBehavior(typed.Event, time.Now().UTC())
+		m.notify("Reminder", m.Status.Text, levelFromError(m.Status.IsError))
 		if m.Scheduler != nil {
 			return m, waitForReminderCmd(m.Scheduler.C())
 		}
@@ -442,8 +492,9 @@ func (m Model) View() string {
 	if m.HelpVisible {
 		helpView = m.renderHelpView()
 	}
+	notificationView := m.renderNotificationsView()
 	return fmt.Sprintf(
-		"taskd | view: %s | selected: %s\nkeys: [%s]today [%s]inbox [%s]calendar [%s]focus [%s]help [%s]quit%s%s%s%s%s%s%s%s",
+		"taskd | view: %s | selected: %s\nkeys: [%s]today [%s]inbox [%s]calendar [%s]focus [%s]help [%s]quit%s%s%s%s%s%s%s%s%s",
 		m.CurrentView,
 		m.SelectedTaskID,
 		m.Keys.Today,
@@ -460,6 +511,7 @@ func (m Model) View() string {
 		reminderView,
 		paletteView,
 		helpView,
+		notificationView,
 	)
 }
 
@@ -1072,8 +1124,10 @@ func (m Model) executePaletteCommand() Model {
 	})
 	if err != nil {
 		m.Status = StatusBar{Text: err.Error(), IsError: true}
+		m.notify("Command Failed", err.Error(), "error")
 	} else {
 		m.Status = StatusBar{Text: res.Message, IsError: false}
+		m.notify("Command", res.Message, "info")
 	}
 
 	m.Palette.Active = false
@@ -1083,6 +1137,14 @@ func (m Model) executePaletteCommand() Model {
 
 func (m Model) renderCommandPalette() string {
 	return fmt.Sprintf("\ncommand: /%s", m.Palette.Input)
+}
+
+func (m Model) renderNotificationsView() string {
+	if len(m.Notifications) == 0 {
+		return ""
+	}
+	n := m.Notifications[len(m.Notifications)-1]
+	return fmt.Sprintf("\nnotification: [%s] %s", strings.ToUpper(n.Level), n.Body)
 }
 
 func (m Model) renderHelpView() string {
@@ -1140,6 +1202,41 @@ func (m Model) viewBindings() []KeyBinding {
 	default:
 		return []KeyBinding{{Key: "-", Action: "no contextual bindings"}}
 	}
+}
+
+func (m *Model) notify(title, body, level string) {
+	if strings.TrimSpace(body) == "" {
+		return
+	}
+	n := Notification{
+		Title: title,
+		Body:  body,
+		Level: level,
+		At:    time.Now().UTC(),
+	}
+	m.Notifications = append(m.Notifications, n)
+	if len(m.Notifications) > 40 {
+		m.Notifications = m.Notifications[len(m.Notifications)-40:]
+	}
+	if m.DesktopEnabled && m.notifier != nil {
+		_ = m.notifier.Send(n)
+	}
+}
+
+func levelFromError(isErr bool) string {
+	if isErr {
+		return "error"
+	}
+	return "info"
+}
+
+func escapeAppleScript(s string) string {
+	return strings.ReplaceAll(s, `"`, `\"`)
+}
+
+func DesktopNotificationsEnabledFromEnv() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("TASKD_DESKTOP_NOTIFICATIONS")))
+	return v == "1" || v == "true" || v == "yes"
 }
 
 func (m *Model) applyReminderBehavior(ev scheduler.ReminderEvent, now time.Time) {
