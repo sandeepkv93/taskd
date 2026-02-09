@@ -68,6 +68,7 @@ type Model struct {
 	Notifications  []Notification
 	DesktopEnabled bool
 	notifier       DesktopNotifier
+	Productivity   ProductivityState
 	Status         StatusBar
 	Keys           GlobalKeyMap
 	Quitting       bool
@@ -171,6 +172,25 @@ type Notification struct {
 	At    time.Time
 }
 
+type ProductivityState struct {
+	AvailableMinutes int
+	Signals          ProductivitySignals
+}
+
+type ProductivitySignals struct {
+	TemporalDebtScore int
+	TemporalDebtLabel string
+	Suggestions       []Suggestion
+}
+
+type Suggestion struct {
+	TaskID  string
+	Title   string
+	Reason  string
+	Energy  string
+	Minutes int
+}
+
 type DesktopNotifier interface {
 	Send(Notification) error
 }
@@ -239,7 +259,7 @@ type AcknowledgeReminderMsg struct {
 }
 
 func NewModel() Model {
-	return Model{
+	m := Model{
 		CurrentView: ViewToday,
 		Sort:        SortCreatedDesc,
 		Inbox: InboxState{
@@ -295,6 +315,9 @@ func NewModel() Model {
 		SoftFollowedUp: make(map[string]bool),
 		DesktopEnabled: false,
 		notifier:       NoopDesktopNotifier{},
+		Productivity: ProductivityState{
+			AvailableMinutes: 60,
+		},
 		Keys: GlobalKeyMap{
 			Today:    "1",
 			Inbox:    "2",
@@ -304,6 +327,8 @@ func NewModel() Model {
 			Quit:     "q",
 		},
 	}
+	m.refreshProductivitySignals()
+	return m
 }
 
 func NewModelWithScheduler(engine *scheduler.Engine) Model {
@@ -424,6 +449,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Today.Items = typed.Items
 		m.Today.Cursor = 0
 		m.syncSelectedTaskToTodayCursor()
+		m.refreshProductivitySignals()
 		return m, nil
 	case SetCalendarItemsMsg:
 		m.Calendar.Items = typed.Items
@@ -492,9 +518,10 @@ func (m Model) View() string {
 	if m.HelpVisible {
 		helpView = m.renderHelpView()
 	}
+	productivityView := m.renderProductivityView()
 	notificationView := m.renderNotificationsView()
 	return fmt.Sprintf(
-		"taskd | view: %s | selected: %s\nkeys: [%s]today [%s]inbox [%s]calendar [%s]focus [%s]help [%s]quit%s%s%s%s%s%s%s%s%s",
+		"taskd | view: %s | selected: %s\nkeys: [%s]today [%s]inbox [%s]calendar [%s]focus [%s]help [%s]quit%s%s%s%s%s%s%s%s%s%s",
 		m.CurrentView,
 		m.SelectedTaskID,
 		m.Keys.Today,
@@ -511,6 +538,7 @@ func (m Model) View() string {
 		reminderView,
 		paletteView,
 		helpView,
+		productivityView,
 		notificationView,
 	)
 }
@@ -1128,6 +1156,7 @@ func (m Model) executePaletteCommand() Model {
 	} else {
 		m.Status = StatusBar{Text: res.Message, IsError: false}
 		m.notify("Command", res.Message, "info")
+		m.refreshProductivitySignals()
 	}
 
 	m.Palette.Active = false
@@ -1145,6 +1174,23 @@ func (m Model) renderNotificationsView() string {
 	}
 	n := m.Notifications[len(m.Notifications)-1]
 	return fmt.Sprintf("\nnotification: [%s] %s", strings.ToUpper(n.Level), n.Body)
+}
+
+func (m Model) renderProductivityView() string {
+	s := m.Productivity.Signals
+	if s.TemporalDebtScore == 0 && len(s.Suggestions) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\nproductivity:\n")
+	b.WriteString(fmt.Sprintf("temporal-debt: %d (%s)\n", s.TemporalDebtScore, s.TemporalDebtLabel))
+	if len(s.Suggestions) > 0 {
+		b.WriteString("suggestions:\n")
+		for _, sg := range s.Suggestions {
+			b.WriteString(fmt.Sprintf("- %s [%s, %dm] %s\n", sg.Title, sg.Energy, sg.Minutes, sg.Reason))
+		}
+	}
+	return strings.TrimSuffix(b.String(), "\n")
 }
 
 func (m Model) renderHelpView() string {
@@ -1220,6 +1266,96 @@ func (m *Model) notify(title, body, level string) {
 	}
 	if m.DesktopEnabled && m.notifier != nil {
 		_ = m.notifier.Send(n)
+	}
+}
+
+func (m *Model) refreshProductivitySignals() {
+	score := m.computeTemporalDebtScore()
+	m.Productivity.Signals.TemporalDebtScore = score
+	switch {
+	case score >= 7:
+		m.Productivity.Signals.TemporalDebtLabel = "high"
+	case score >= 4:
+		m.Productivity.Signals.TemporalDebtLabel = "medium"
+	default:
+		m.Productivity.Signals.TemporalDebtLabel = "low"
+	}
+	m.Productivity.Signals.Suggestions = m.computeEnergySuggestions(m.Productivity.AvailableMinutes, 3)
+}
+
+func (m Model) computeTemporalDebtScore() int {
+	score := 0
+	for _, item := range m.Today.Items {
+		if item.Bucket == TodayBucketOverdue {
+			score += 2
+		}
+		notes := strings.ToLower(item.Notes)
+		if strings.Contains(notes, "snoozed") {
+			score++
+		}
+		if item.Priority == "Critical" && item.Bucket == TodayBucketOverdue {
+			score++
+		}
+	}
+	if score > 10 {
+		return 10
+	}
+	return score
+}
+
+func (m Model) computeEnergySuggestions(availableMinutes int, limit int) []Suggestion {
+	if availableMinutes <= 0 || limit <= 0 {
+		return nil
+	}
+	out := make([]Suggestion, 0, limit)
+	for _, item := range m.Today.Items {
+		energy := inferEnergyFromTodayItem(item)
+		minutes := estimateMinutesForEnergy(energy)
+		if minutes > availableMinutes {
+			continue
+		}
+		reason := fmt.Sprintf("fits %d-minute window", availableMinutes)
+		if item.Bucket == TodayBucketOverdue {
+			reason = "overdue and still feasible now"
+		}
+		out = append(out, Suggestion{
+			TaskID:  item.ID,
+			Title:   item.Title,
+			Reason:  reason,
+			Energy:  energy,
+			Minutes: minutes,
+		})
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func inferEnergyFromTodayItem(item TodayItem) string {
+	combined := strings.ToLower(item.Title + " " + item.Notes + " " + strings.Join(item.Tags, " "))
+	switch {
+	case strings.Contains(combined, "call"), strings.Contains(combined, "meeting"), strings.Contains(combined, "standup"):
+		return "Social"
+	case strings.Contains(combined, "review"), strings.Contains(combined, "docs"), strings.Contains(combined, "write"):
+		return "Light"
+	case strings.Contains(combined, "tax"), strings.Contains(combined, "budget"), strings.Contains(combined, "email"):
+		return "Low"
+	default:
+		return "Deep"
+	}
+}
+
+func estimateMinutesForEnergy(energy string) int {
+	switch strings.ToLower(energy) {
+	case "deep":
+		return 90
+	case "social":
+		return 45
+	case "light":
+		return 30
+	default:
+		return 20
 	}
 }
 

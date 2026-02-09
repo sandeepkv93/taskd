@@ -626,3 +626,71 @@ func TestDesktopNotificationOptional(t *testing.T) {
 		t.Fatalf("expected desktop notifier not to be called when disabled, got %d", f2.count)
 	}
 }
+
+func TestTemporalDebtScoring(t *testing.T) {
+	m := NewModel()
+	m.Today.Items = []TodayItem{
+		{ID: "a", Title: "late critical", Bucket: TodayBucketOverdue, Priority: "Critical", Notes: "snoozed yesterday"},
+		{ID: "b", Title: "late normal", Bucket: TodayBucketOverdue, Priority: "Medium"},
+		{ID: "c", Title: "normal", Bucket: TodayBucketAnytime, Priority: "Low", Notes: "snoozed once"},
+	}
+
+	score := m.computeTemporalDebtScore()
+	// a: overdue(2)+snoozed(1)+critical overdue(1)=4, b:2, c:1 => total 7
+	if score != 7 {
+		t.Fatalf("expected temporal debt score 7, got %d", score)
+	}
+}
+
+func TestEnergyAwareSuggestions(t *testing.T) {
+	m := NewModel()
+	m.Today.Items = []TodayItem{
+		{ID: "d1", Title: "deep architecture refactor", Bucket: TodayBucketAnytime, Notes: "complex module"},
+		{ID: "l1", Title: "write release notes", Bucket: TodayBucketAnytime, Notes: "docs"},
+		{ID: "s1", Title: "team standup call", Bucket: TodayBucketScheduled, Notes: "meeting"},
+		{ID: "o1", Title: "submit tax forms", Bucket: TodayBucketOverdue, Notes: "finance"},
+	}
+
+	suggestions := m.computeEnergySuggestions(45, 5)
+	if len(suggestions) == 0 {
+		t.Fatal("expected suggestions for 45-minute window")
+	}
+	for _, s := range suggestions {
+		if s.Minutes > 45 {
+			t.Fatalf("suggestion exceeds window: %+v", s)
+		}
+	}
+	foundOverdue := false
+	for _, s := range suggestions {
+		if s.TaskID == "o1" {
+			foundOverdue = true
+			if !strings.Contains(strings.ToLower(s.Reason), "overdue") {
+				t.Fatalf("expected overdue reason for o1, got %q", s.Reason)
+			}
+		}
+	}
+	if !foundOverdue {
+		t.Fatal("expected overdue task to appear in suggestions when feasible")
+	}
+}
+
+func TestProductivityViewIncludesDebtAndSuggestions(t *testing.T) {
+	m := NewModel()
+	m.Today.Items = []TodayItem{
+		{ID: "x", Title: "overdue email", Bucket: TodayBucketOverdue, Notes: "snoozed"},
+		{ID: "y", Title: "write docs", Bucket: TodayBucketAnytime, Notes: "docs"},
+	}
+	m.Productivity.AvailableMinutes = 30
+	m.refreshProductivitySignals()
+
+	out := m.View()
+	if !strings.Contains(out, "productivity:") {
+		t.Fatalf("expected productivity panel in output: %q", out)
+	}
+	if !strings.Contains(out, "temporal-debt:") {
+		t.Fatalf("expected temporal debt in output: %q", out)
+	}
+	if !strings.Contains(out, "suggestions:") {
+		t.Fatalf("expected suggestions in output: %q", out)
+	}
+}
