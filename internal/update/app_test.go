@@ -478,8 +478,19 @@ func TestReminderBehaviorContextualWindowAndDeferral(t *testing.T) {
 	if !strings.Contains(m.Status.Text, "contextual deferred") {
 		t.Fatalf("expected contextual deferred status, got %q", m.Status.Text)
 	}
-	if nextContextualWindowStart(outWindow).Hour() != 18 {
-		t.Fatalf("expected next contextual start at 18:00, got %s", nextContextualWindowStart(outWindow).Format("15:04"))
+	if nextContextualWindowStartForRule(outWindow, "evening").Hour() != 18 {
+		t.Fatalf("expected next contextual start at 18:00, got %s", nextContextualWindowStartForRule(outWindow, "evening").Format("15:04"))
+	}
+}
+
+func TestReminderBehaviorNaggingStopsWhenTaskCompleted(t *testing.T) {
+	m := NewModel()
+	now := time.Date(2026, 2, 9, 12, 0, 0, 0, time.UTC)
+	m.CompletedTasks["task-x"] = true
+	ev := scheduler.ReminderEvent{ID: "r-nag2", TaskID: "task-x", Type: "Nagging", TriggerAt: now}
+	m.applyReminderBehavior(ev, now)
+	if strings.Contains(strings.ToLower(m.Status.Text), "failed") {
+		t.Fatalf("unexpected reschedule failure for completed task: %q", m.Status.Text)
 	}
 }
 

@@ -6,12 +6,24 @@ import (
 	"os/exec"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/help"
+	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/progress"
+	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/table"
+	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sandeepkv93/taskd/internal/commands"
+	domainmodel "github.com/sandeepkv93/taskd/internal/model"
 	"github.com/sandeepkv93/taskd/internal/scheduler"
+	"github.com/sandeepkv93/taskd/internal/views"
 )
 
 type View string
@@ -63,6 +75,7 @@ type Model struct {
 	ReminderLog    []scheduler.ReminderEvent
 	ReminderAck    map[string]bool
 	SoftFollowedUp map[string]bool
+	CompletedTasks map[string]bool
 	Palette        CommandPaletteState
 	HelpVisible    bool
 	Notifications  []Notification
@@ -73,6 +86,20 @@ type Model struct {
 	Keys           GlobalKeyMap
 	Quitting       bool
 	LastError      error
+	// Bubble components used for rich TUI controls
+	inboxList     list.Model
+	todayList     list.Model
+	calendarTable table.Model
+	quickAddInput textinput.Model
+	commandInput  textinput.Model
+	notesArea     textarea.Model
+	focusProgress progress.Model
+	syncSpinner   spinner.Model
+	helpModel     help.Model
+	metaViewport  viewport.Model
+	spinnerActive bool
+	// Recurrence editor (first-pass UI)
+	recurrenceEditor RecurrenceEditorState
 }
 
 type InboxItem struct {
@@ -160,10 +187,35 @@ type CommandPaletteState struct {
 	Input  string
 }
 
+type RecurrenceEditorState struct {
+	Active       bool
+	RuleType     string
+	IntervalText string
+	Preview      []string
+	Err          string
+}
+
+type listItem struct {
+	title       string
+	description string
+}
+
+func (i listItem) FilterValue() string { return i.title + " " + i.description }
+func (i listItem) Title() string       { return i.title }
+func (i listItem) Description() string { return i.description }
+
 type KeyBinding struct {
 	Key    string
 	Action string
 }
+
+type helpKeyMap struct {
+	short []key.Binding
+	full  [][]key.Binding
+}
+
+func (k helpKeyMap) ShortHelp() []key.Binding  { return k.short }
+func (k helpKeyMap) FullHelp() [][]key.Binding { return k.full }
 
 type Notification struct {
 	Title string
@@ -313,6 +365,7 @@ func NewModel() Model {
 		},
 		ReminderAck:    make(map[string]bool),
 		SoftFollowedUp: make(map[string]bool),
+		CompletedTasks: make(map[string]bool),
 		DesktopEnabled: false,
 		notifier:       NoopDesktopNotifier{},
 		Productivity: ProductivityState{
@@ -326,7 +379,13 @@ func NewModel() Model {
 			Help:     "?",
 			Quit:     "q",
 		},
+		recurrenceEditor: RecurrenceEditorState{
+			RuleType:     "every_n_days",
+			IntervalText: "1",
+		},
 	}
+	m.initBubbleComponents()
+	m.syncBubbleData()
 	m.refreshProductivitySignals()
 	return m
 }
@@ -372,6 +431,8 @@ func (m Model) Init() tea.Cmd {
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	defer m.syncBubbleData()
+
 	switch typed := msg.(type) {
 	case tea.KeyMsg:
 		m.ensureInboxState()
@@ -387,10 +448,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return next, nil
 		}
 
+		if m.recurrenceEditor.Active {
+			next := m.handleRecurrenceEditorKey(typed)
+			return next, nil
+		}
+
 		switch typed.String() {
 		case "/":
 			m.Palette.Active = true
 			m.Palette.Input = ""
+			m.commandInput.Focus()
+			m.commandInput.SetValue("")
 			m.Status = StatusBar{Text: "command palette active", IsError: false}
 			return m, nil
 		case m.Keys.Today:
@@ -414,6 +482,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.Status = StatusBar{Text: "help hidden", IsError: false}
 			}
 			return m, nil
+		case "S":
+			if !m.spinnerActive {
+				m.spinnerActive = true
+				m.Status = StatusBar{Text: "sync started", IsError: false}
+				return m, tea.Batch(m.syncSpinner.Tick, tea.Tick(2*time.Second, func(time.Time) tea.Msg { return SetStatusMsg{Text: "sync complete", IsError: false} }))
+			}
+			return m, nil
+		case "R":
+			if m.CurrentView == ViewToday {
+				m.recurrenceEditor.Active = true
+				m.recurrenceEditor.Err = ""
+				return m, nil
+			}
 		case "ctrl+c", m.Keys.Quit:
 			m.Quitting = true
 			return m, tea.Quit
@@ -431,6 +512,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			next, cmd := m.handleFocusKey(typed)
 			return next, cmd
 		}
+	case spinner.TickMsg:
+		if m.spinnerActive {
+			var cmd tea.Cmd
+			m.syncSpinner, cmd = m.syncSpinner.Update(typed)
+			return m, cmd
+		}
 	case SwitchViewMsg:
 		if isKnownView(typed.View) {
 			m.CurrentView = typed.View
@@ -441,6 +528,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case SetStatusMsg:
 		m.Status = StatusBar{Text: typed.Text, IsError: typed.IsError}
+		if strings.Contains(strings.ToLower(typed.Text), "sync complete") {
+			m.spinnerActive = false
+		}
 		m.notify("Status", typed.Text, levelFromError(typed.IsError))
 		return m, nil
 	case ClearStatusMsg:
@@ -501,63 +591,50 @@ func (m Model) View() string {
 	status := ""
 	if m.Status.Text != "" {
 		if m.Status.IsError {
-			status = fmt.Sprintf("\nstatus: error: %s", m.Status.Text)
+			status = fmt.Sprintf("status: error: %s", m.Status.Text)
 		} else {
-			status = fmt.Sprintf("\nstatus: %s", m.Status.Text)
+			status = fmt.Sprintf("status: %s", m.Status.Text)
 		}
 	}
-	inboxView := ""
-	if m.CurrentView == ViewInbox {
-		inboxView = m.renderInboxView()
+	leftPane := ""
+	rightPane := ""
+	switch m.CurrentView {
+	case ViewInbox:
+		leftPane = m.renderInboxView()
+		rightPane = m.renderCommandPalette() + m.renderHelpIfVisible()
+	case ViewToday:
+		leftPane = m.renderTodayView()
+		rightPane = m.renderTodayMetadataPane() + m.renderRecurrenceEditorIfVisible() + m.renderHelpIfVisible()
+	case ViewCalendar:
+		leftPane = m.renderCalendarView()
+		rightPane = m.renderHelpIfVisible()
+	case ViewFocus:
+		leftPane = m.renderFocusView()
+		rightPane = m.renderHelpIfVisible()
 	}
-	todayView := ""
-	if m.CurrentView == ViewToday {
-		todayView = m.renderTodayView()
-	}
-	calendarView := ""
-	if m.CurrentView == ViewCalendar {
-		calendarView = m.renderCalendarView()
-	}
-	focusView := ""
-	if m.CurrentView == ViewFocus {
-		focusView = m.renderFocusView()
-	}
-	reminderView := ""
+	notificationView := ""
 	if len(m.ReminderLog) > 0 {
 		last := m.ReminderLog[len(m.ReminderLog)-1]
-		reminderView = fmt.Sprintf("\nlast-reminder: %s @ %s", last.ID, last.TriggerAt.Format("15:04:05"))
+		notificationView = fmt.Sprintf("last-reminder: %s @ %s", last.ID, last.TriggerAt.Format("15:04:05"))
 	}
-	paletteView := ""
-	if m.Palette.Active {
-		paletteView = m.renderCommandPalette()
+	if m.spinnerActive {
+		spin := m.syncSpinner.View()
+		notificationView = strings.TrimSpace(strings.Join([]string{notificationView, "sync: " + spin + " running"}, "\n"))
 	}
-	helpView := ""
-	if m.HelpVisible {
-		helpView = m.renderHelpView()
-	}
-	productivityView := m.renderProductivityView()
-	notificationView := m.renderNotificationsView()
-	return fmt.Sprintf(
-		"taskd | view: %s | selected: %s\nkeys: [%s]today [%s]inbox [%s]calendar [%s]focus [%s]help [%s]quit%s%s%s%s%s%s%s%s%s%s",
-		m.CurrentView,
-		m.SelectedTaskID,
-		m.Keys.Today,
-		m.Keys.Inbox,
-		m.Keys.Calendar,
-		m.Keys.Focus,
-		m.Keys.Help,
-		m.Keys.Quit,
-		status,
-		inboxView,
-		todayView,
-		calendarView,
-		focusView,
-		reminderView,
-		paletteView,
-		helpView,
-		productivityView,
+	notificationView = strings.TrimSpace(strings.Join([]string{
 		notificationView,
-	)
+		strings.TrimSpace(m.renderNotificationsView()),
+		strings.TrimSpace(m.renderProductivityView()),
+	}, "\n"))
+
+	return views.RenderApp(views.AppData{
+		Header:       fmt.Sprintf("taskd | view: %s | selected: %s", m.CurrentView, m.SelectedTaskID),
+		LeftPane:     leftPane,
+		RightPane:    rightPane,
+		StatusLine:   status,
+		Notification: notificationView,
+		Footer:       fmt.Sprintf("keys: %s today | %s inbox | %s calendar | %s focus | %s help | %s quit", m.Keys.Today, m.Keys.Inbox, m.Keys.Calendar, m.Keys.Focus, m.Keys.Help, m.Keys.Quit),
+	})
 }
 
 func isKnownView(v View) bool {
@@ -567,6 +644,115 @@ func isKnownView(v View) bool {
 	default:
 		return false
 	}
+}
+
+func (m *Model) initBubbleComponents() {
+	m.inboxList = list.New([]list.Item{}, list.NewDefaultDelegate(), 56, 12)
+	m.inboxList.Title = "Inbox (list)"
+	m.inboxList.SetShowHelp(false)
+	m.inboxList.SetFilteringEnabled(false)
+
+	m.todayList = list.New([]list.Item{}, list.NewDefaultDelegate(), 56, 12)
+	m.todayList.Title = "Today (list)"
+	m.todayList.SetShowHelp(false)
+	m.todayList.SetFilteringEnabled(false)
+
+	cols := []table.Column{
+		{Title: "Date", Width: 12},
+		{Title: "Time", Width: 7},
+		{Title: "Kind", Width: 8},
+		{Title: "Title", Width: 24},
+	}
+	m.calendarTable = table.New(table.WithColumns(cols), table.WithRows([]table.Row{}), table.WithFocused(true), table.WithHeight(10))
+
+	m.quickAddInput = textinput.New()
+	m.quickAddInput.Prompt = "add> "
+	m.quickAddInput.CharLimit = 256
+	m.quickAddInput.Width = 42
+
+	m.commandInput = textinput.New()
+	m.commandInput.Prompt = "/"
+	m.commandInput.CharLimit = 256
+	m.commandInput.Width = 48
+
+	m.notesArea = textarea.New()
+	m.notesArea.SetWidth(54)
+	m.notesArea.SetHeight(8)
+	m.notesArea.ShowLineNumbers = false
+	m.notesArea.Placeholder = "Task notes (markdown)"
+
+	m.focusProgress = progress.New(progress.WithDefaultGradient())
+
+	m.syncSpinner = spinner.New()
+	m.syncSpinner.Spinner = spinner.Dot
+
+	m.helpModel = help.New()
+	m.metaViewport = viewport.New(54, 12)
+}
+
+func (m *Model) syncBubbleData() {
+	inboxItems := make([]list.Item, 0, len(m.Inbox.Items))
+	for _, item := range m.Inbox.Items {
+		desc := item.ScheduledFor
+		if desc == "" {
+			desc = strings.Join(item.Tags, ",")
+		}
+		inboxItems = append(inboxItems, listItem{title: item.Title, description: desc})
+	}
+	m.inboxList.SetItems(inboxItems)
+	if len(inboxItems) > 0 {
+		m.inboxList.Select(m.Inbox.Cursor)
+	}
+
+	todayItems := make([]list.Item, 0, len(m.Today.Items))
+	for _, item := range m.Today.Items {
+		desc := fmt.Sprintf("%s | %s", item.Bucket, item.Priority)
+		todayItems = append(todayItems, listItem{title: item.Title, description: desc})
+	}
+	m.todayList.SetItems(todayItems)
+	if len(todayItems) > 0 {
+		m.todayList.Select(m.Today.Cursor)
+	}
+
+	rows := make([]table.Row, 0, len(m.Calendar.Items))
+	for _, item := range m.Calendar.Items {
+		rows = append(rows, table.Row{item.Date, item.Time, strings.ToUpper(item.Kind), item.Title})
+	}
+	m.calendarTable.SetRows(rows)
+	if len(rows) > 0 && m.Calendar.Cursor < len(rows) {
+		m.calendarTable.SetCursor(m.Calendar.Cursor)
+	}
+
+	m.quickAddInput.SetValue(m.Inbox.Input)
+	m.commandInput.SetValue(m.Palette.Input)
+	if m.CurrentView == ViewInbox {
+		m.quickAddInput.Focus()
+	}
+	if m.Palette.Active {
+		m.commandInput.Focus()
+	}
+
+	if sel, ok := m.currentTodayItem(); ok {
+		md := sel.Notes
+		if strings.TrimSpace(md) == "" {
+			md = "_No notes_"
+		}
+		m.notesArea.SetValue(md)
+		m.metaViewport.SetContent(views.RenderMarkdown(md))
+	}
+
+	total := m.currentFocusTotal()
+	pct := 0.0
+	if total > 0 {
+		pct = float64(total-m.Focus.RemainingSec) / float64(total)
+	}
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 1 {
+		pct = 1
+	}
+	_ = m.focusProgress.SetPercent(pct)
 }
 
 func (m *Model) ensureInboxState() {
@@ -611,11 +797,9 @@ func (m *Model) ensureCalendarState() {
 func (m Model) handleInboxKey(msg tea.KeyMsg) Model {
 	switch msg.String() {
 	case "enter":
-		m.addInboxItem(m.Inbox.Input)
-	case "backspace":
-		if len(m.Inbox.Input) > 0 {
-			m.Inbox.Input = m.Inbox.Input[:len(m.Inbox.Input)-1]
-		}
+		m.addInboxItem(m.quickAddInput.Value())
+		m.quickAddInput.SetValue("")
+		m.Inbox.Input = ""
 	case "up", "k":
 		if m.Inbox.Cursor > 0 {
 			m.Inbox.Cursor--
@@ -636,8 +820,14 @@ func (m Model) handleInboxKey(msg tea.KeyMsg) Model {
 		m.bulkTagInbox("triage")
 	default:
 		if msg.Type == tea.KeyRunes {
-			m.Inbox.Input += string(msg.Runes)
+			m.quickAddInput.SetValue(m.quickAddInput.Value() + string(msg.Runes))
+			m.Inbox.Input = m.quickAddInput.Value()
+			return m
 		}
+		var cmd tea.Cmd
+		m.quickAddInput, cmd = m.quickAddInput.Update(msg)
+		_ = cmd
+		m.Inbox.Input = m.quickAddInput.Value()
 	}
 	return m
 }
@@ -824,33 +1014,11 @@ func (m *Model) bulkTagInbox(tag string) {
 
 func (m Model) renderInboxView() string {
 	var b strings.Builder
-	b.WriteString("\ninbox:\n")
-	b.WriteString(fmt.Sprintf("quick-add: %s\n", m.Inbox.Input))
+	b.WriteString("inbox:\n")
+	b.WriteString(m.quickAddInput.View() + "\n")
 	b.WriteString("actions: [enter]add [space]select [x]all [u]clear [s]schedule [g]tag\n")
-	if len(m.Inbox.Items) == 0 {
-		b.WriteString("(empty)")
-		return b.String()
-	}
-	for i, item := range m.Inbox.Items {
-		cursor := " "
-		if i == m.Inbox.Cursor {
-			cursor = ">"
-		}
-		selected := " "
-		if m.Inbox.Selected[item.ID] {
-			selected = "x"
-		}
-		tags := ""
-		if len(item.Tags) > 0 {
-			tags = " tags=" + strings.Join(item.Tags, ",")
-		}
-		scheduled := ""
-		if item.ScheduledFor != "" {
-			scheduled = " scheduled=" + item.ScheduledFor
-		}
-		b.WriteString(fmt.Sprintf("%s[%s] %s%s%s\n", cursor, selected, item.Title, scheduled, tags))
-	}
-	return strings.TrimSuffix(b.String(), "\n")
+	b.WriteString(m.inboxList.View())
+	return strings.TrimSpace(b.String())
 }
 
 func (m Model) renderTodayView() string {
@@ -869,8 +1037,9 @@ func (m Model) renderTodayView() string {
 	}
 
 	var b strings.Builder
-	b.WriteString("\ntoday:\n")
+	b.WriteString("today:\n")
 	b.WriteString("actions: [j/k]move [1]today [2]inbox [3]calendar [4]focus\n")
+	b.WriteString(m.todayList.View() + "\n")
 	renderTodaySection(&b, "Scheduled", scheduled, m.Today)
 	renderTodaySection(&b, "Anytime", anytime, m.Today)
 	renderTodaySection(&b, "Overdue", overdue, m.Today)
@@ -895,14 +1064,15 @@ func (m Model) renderTodayView() string {
 		}
 	}
 
-	return strings.TrimSuffix(b.String(), "\n")
+	return strings.TrimSpace(b.String())
 }
 
 func (m Model) renderCalendarView() string {
 	var b strings.Builder
-	b.WriteString("\ncalendar:\n")
+	b.WriteString("calendar:\n")
 	b.WriteString(fmt.Sprintf("mode: %s | focus: %s\n", m.Calendar.Mode, m.Calendar.FocusDate.Format("2006-01-02")))
 	b.WriteString("actions: [d]day [w]week [m]month [h/l]period [j/k]agenda\n")
+	b.WriteString(m.calendarTable.View() + "\n")
 
 	grouped := make(map[string][]AgendaItem)
 	keys := make([]string, 0)
@@ -939,7 +1109,7 @@ func (m Model) renderCalendarView() string {
 		b.WriteString(fmt.Sprintf("when: %s %s\n", selected.Date, selected.Time))
 	}
 
-	return strings.TrimSuffix(b.String(), "\n")
+	return strings.TrimSpace(b.String())
 }
 
 func (m Model) renderFocusView() string {
@@ -950,7 +1120,7 @@ func (m Model) renderFocusView() string {
 	}
 
 	var b strings.Builder
-	b.WriteString("\nfocus:\n")
+	b.WriteString("focus:\n")
 	if m.Focus.TaskTitle != "" {
 		b.WriteString(fmt.Sprintf("task: %s\n", m.Focus.TaskTitle))
 	} else {
@@ -958,13 +1128,13 @@ func (m Model) renderFocusView() string {
 	}
 	b.WriteString(fmt.Sprintf("phase: %s\n", strings.ToUpper(string(m.Focus.Phase))))
 	b.WriteString(fmt.Sprintf("timer: %s\n", formatDuration(m.Focus.RemainingSec)))
-	b.WriteString(fmt.Sprintf("progress: %s %.0f%%\n", progressBar(progress, 20), progress*100))
+	b.WriteString(fmt.Sprintf("progress: %s %.0f%%\n", m.focusProgress.ViewAs(progress), progress*100))
 	b.WriteString(fmt.Sprintf("pomodoros completed: %d\n", m.Focus.CompletedPomodoros))
 	b.WriteString("actions: [space]start/pause [r]reset [n]next-phase\n")
 	if m.Focus.RemainingSec == 0 {
 		b.WriteString("prompt: session ended, press [n] to continue")
 	}
-	return strings.TrimSuffix(b.String(), "\n")
+	return strings.TrimSpace(b.String())
 }
 
 func renderTodaySection(b *strings.Builder, title string, items []TodayItem, state TodayState) {
@@ -1056,6 +1226,9 @@ func (m *Model) bootstrapFocusTask() {
 func (m *Model) completeFocusPhase() {
 	if m.Focus.Phase == FocusPhaseWork {
 		m.Focus.CompletedPomodoros++
+		if m.Focus.TaskID != "" {
+			m.CompletedTasks[m.Focus.TaskID] = true
+		}
 		m.Focus.Phase = FocusPhaseBreak
 		m.Focus.RemainingSec = m.Focus.BreakDurationSec
 		m.Focus.Running = false
@@ -1097,17 +1270,22 @@ func (m Model) handlePaletteKey(msg tea.KeyMsg) Model {
 	case "esc":
 		m.Palette.Active = false
 		m.Palette.Input = ""
+		m.commandInput.SetValue("")
+		m.commandInput.Blur()
 		m.Status = StatusBar{Text: "command palette closed", IsError: false}
 	case "enter":
+		m.Palette.Input = m.commandInput.Value()
 		m = m.executePaletteCommand()
-	case "backspace":
-		if len(m.Palette.Input) > 0 {
-			m.Palette.Input = m.Palette.Input[:len(m.Palette.Input)-1]
-		}
 	default:
 		if msg.Type == tea.KeyRunes {
-			m.Palette.Input += string(msg.Runes)
+			m.commandInput.SetValue(m.commandInput.Value() + string(msg.Runes))
+			m.Palette.Input = m.commandInput.Value()
+			return m
 		}
+		var cmd tea.Cmd
+		m.commandInput, cmd = m.commandInput.Update(msg)
+		_ = cmd
+		m.Palette.Input = m.commandInput.Value()
 	}
 	return m
 }
@@ -1178,11 +1356,15 @@ func (m Model) executePaletteCommand() Model {
 
 	m.Palette.Active = false
 	m.Palette.Input = ""
+	m.commandInput.SetValue("")
 	return m
 }
 
 func (m Model) renderCommandPalette() string {
-	return fmt.Sprintf("\ncommand: /%s", m.Palette.Input)
+	if !m.Palette.Active {
+		return ""
+	}
+	return fmt.Sprintf("command: /%s", m.Palette.Input)
 }
 
 func (m Model) renderNotificationsView() string {
@@ -1210,18 +1392,120 @@ func (m Model) renderProductivityView() string {
 	return strings.TrimSuffix(b.String(), "\n")
 }
 
-func (m Model) renderHelpView() string {
-	var b strings.Builder
-	b.WriteString("\nhelp:\n")
-	b.WriteString("global:\n")
-	for _, kb := range m.globalBindings() {
-		b.WriteString(fmt.Sprintf("  %-8s %s\n", kb.Key, kb.Action))
+func (m Model) renderHelpIfVisible() string {
+	if !m.HelpVisible {
+		return ""
 	}
-	b.WriteString(fmt.Sprintf("%s view:\n", strings.ToLower(string(m.CurrentView))))
-	for _, kb := range m.viewBindings() {
-		b.WriteString(fmt.Sprintf("  %-8s %s\n", kb.Key, kb.Action))
+	return m.renderHelpView()
+}
+
+func (m Model) renderTodayMetadataPane() string {
+	selected, ok := m.currentTodayItem()
+	if !ok {
+		return "metadata:\n(no selection)"
+	}
+	notes := selected.Notes
+	if notes == "" {
+		notes = "_No notes_"
+	}
+	return fmt.Sprintf("metadata:\nid: %s\npriority: %s\ntags: %s\n\nnotes-editor:\n%s\n\nmarkdown-preview:\n%s",
+		selected.ID,
+		selected.Priority,
+		strings.Join(selected.Tags, ","),
+		m.notesArea.View(),
+		m.metaViewport.View(),
+	)
+}
+
+func (m Model) renderRecurrenceEditorIfVisible() string {
+	if !m.recurrenceEditor.Active {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\nrecurrence-editor:\n")
+	b.WriteString("keys: [tab] field [enter] preview [esc] close\n")
+	b.WriteString(fmt.Sprintf("type: %s\n", m.recurrenceEditor.RuleType))
+	b.WriteString(fmt.Sprintf("interval: %s\n", m.recurrenceEditor.IntervalText))
+	if m.recurrenceEditor.Err != "" {
+		b.WriteString("error: " + m.recurrenceEditor.Err + "\n")
+	}
+	if len(m.recurrenceEditor.Preview) > 0 {
+		b.WriteString("preview:\n")
+		for _, item := range m.recurrenceEditor.Preview {
+			b.WriteString("- " + item + "\n")
+		}
 	}
 	return strings.TrimSuffix(b.String(), "\n")
+}
+
+func (m Model) handleRecurrenceEditorKey(msg tea.KeyMsg) Model {
+	switch msg.String() {
+	case "esc":
+		m.recurrenceEditor.Active = false
+		return m
+	case "tab":
+		// Toggle between known presets to keep editor predictable in first pass.
+		switch m.recurrenceEditor.RuleType {
+		case "every_weekday":
+			m.recurrenceEditor.RuleType = "every_n_days"
+		case "every_n_days":
+			m.recurrenceEditor.RuleType = "every_n_weeks"
+		case "every_n_weeks":
+			m.recurrenceEditor.RuleType = "last_day_of_month"
+		case "last_day_of_month":
+			m.recurrenceEditor.RuleType = "after_completion"
+		default:
+			m.recurrenceEditor.RuleType = "every_weekday"
+		}
+	case "enter":
+		m.computeRecurrencePreview()
+	case "backspace":
+		if len(m.recurrenceEditor.IntervalText) > 0 {
+			m.recurrenceEditor.IntervalText = m.recurrenceEditor.IntervalText[:len(m.recurrenceEditor.IntervalText)-1]
+		}
+	default:
+		if msg.Type == tea.KeyRunes {
+			m.recurrenceEditor.IntervalText += string(msg.Runes)
+		}
+	}
+	return m
+}
+
+func (m *Model) computeRecurrencePreview() {
+	interval := 1
+	if v := strings.TrimSpace(m.recurrenceEditor.IntervalText); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+			interval = parsed
+		}
+	}
+	rule := domainmodel.RecurrenceRule{
+		Type:     domainmodel.RecurrenceType(m.recurrenceEditor.RuleType),
+		Interval: interval,
+		Anchor:   time.Now().UTC(),
+	}
+	preview, err := rule.Preview(time.Now().UTC(), nil, 5)
+	if err != nil {
+		m.recurrenceEditor.Err = err.Error()
+		m.recurrenceEditor.Preview = nil
+		return
+	}
+	m.recurrenceEditor.Err = ""
+	m.recurrenceEditor.Preview = make([]string, 0, len(preview))
+	for _, item := range preview {
+		m.recurrenceEditor.Preview = append(m.recurrenceEditor.Preview, item.Format("2006-01-02 15:04"))
+	}
+}
+
+func (m Model) renderHelpView() string {
+	bindings := m.helpBindings()
+	var plain []string
+	for _, kb := range m.viewBindings() {
+		plain = append(plain, fmt.Sprintf("- %s: %s", kb.Key, kb.Action))
+	}
+	return fmt.Sprintf("help:\nglobal:\n%s view:\n%s\n%s", strings.ToLower(string(m.CurrentView)), strings.Join(plain, "\n"), m.helpModel.View(helpKeyMap{
+		short: bindings,
+		full:  [][]key.Binding{bindings},
+	}))
 }
 
 func (m Model) globalBindings() []KeyBinding {
@@ -1265,6 +1549,17 @@ func (m Model) viewBindings() []KeyBinding {
 	default:
 		return []KeyBinding{{Key: "-", Action: "no contextual bindings"}}
 	}
+}
+
+func (m Model) helpBindings() []key.Binding {
+	out := make([]key.Binding, 0, len(m.globalBindings())+len(m.viewBindings()))
+	for _, kb := range m.globalBindings() {
+		out = append(out, key.NewBinding(key.WithKeys(kb.Key), key.WithHelp(kb.Key, kb.Action)))
+	}
+	for _, kb := range m.viewBindings() {
+		out = append(out, key.NewBinding(key.WithKeys(kb.Key), key.WithHelp(kb.Key, kb.Action)))
+	}
+	return out
 }
 
 func (m *Model) notify(title, body, level string) {
@@ -1405,14 +1700,14 @@ func (m *Model) applyReminderBehavior(ev scheduler.ReminderEvent, now time.Time)
 		}
 	case "nagging":
 		m.Status = StatusBar{Text: fmt.Sprintf("nagging reminder: %s", ev.ID), IsError: false}
-		if !m.ReminderAck[ev.ID] {
+		if !m.ReminderAck[ev.ID] && !m.isTaskCompleted(ev.TaskID) {
 			m.rescheduleReminder(ev, now.Add(2*time.Minute))
 		}
 	case "contextual":
-		if inContextualWindow(now) {
+		if inContextualWindowForRule(now, ev.RepeatRule) {
 			m.Status = StatusBar{Text: fmt.Sprintf("contextual reminder: %s", ev.ID), IsError: false}
 		} else {
-			next := nextContextualWindowStart(now)
+			next := nextContextualWindowStartForRule(now, ev.RepeatRule)
 			m.Status = StatusBar{Text: fmt.Sprintf("contextual deferred: %s -> %s", ev.ID, next.Format("15:04")), IsError: false}
 			m.rescheduleReminder(ev, next)
 		}
@@ -1432,19 +1727,46 @@ func (m *Model) rescheduleReminder(ev scheduler.ReminderEvent, next time.Time) {
 	}
 }
 
-func inContextualWindow(now time.Time) bool {
-	h := now.Hour()
-	return h >= 18 && h < 22
+func inContextualWindowForRule(now time.Time, rule string) bool {
+	needsWeekend := strings.Contains(strings.ToLower(rule), "weekend")
+	needsEvening := strings.Contains(strings.ToLower(rule), "evening")
+	if !needsWeekend && !needsEvening {
+		needsEvening = true
+	}
+	if needsWeekend {
+		w := now.Weekday()
+		if w != time.Saturday && w != time.Sunday {
+			return false
+		}
+	}
+	if needsEvening {
+		h := now.Hour()
+		if h < 18 || h >= 22 {
+			return false
+		}
+	}
+	return true
 }
 
-func nextContextualWindowStart(now time.Time) time.Time {
-	y, mo, d := now.Date()
+func nextContextualWindowStartForRule(now time.Time, rule string) time.Time {
 	loc := now.Location()
-	todayStart := time.Date(y, mo, d, 18, 0, 0, 0, loc)
-	if now.Before(todayStart) {
-		return todayStart
+	next := now
+	for i := 0; i < 14; i++ {
+		y, mo, d := next.Date()
+		candidate := time.Date(y, mo, d, 18, 0, 0, 0, loc)
+		if candidate.After(now) && inContextualWindowForRule(candidate.Add(30*time.Minute), rule) {
+			return candidate
+		}
+		next = next.AddDate(0, 0, 1)
 	}
-	return todayStart.AddDate(0, 0, 1)
+	return now.Add(24 * time.Hour)
+}
+
+func (m Model) isTaskCompleted(taskID string) bool {
+	if strings.TrimSpace(taskID) == "" {
+		return false
+	}
+	return m.CompletedTasks[taskID]
 }
 
 func formatDuration(totalSec int) string {

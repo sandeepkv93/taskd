@@ -11,10 +11,11 @@ import (
 var ErrInvalidTriggerTime = errors.New("scheduler: invalid trigger time")
 
 type ReminderEvent struct {
-	ID        string
-	TaskID    string
-	Type      string
-	TriggerAt time.Time
+	ID         string
+	TaskID     string
+	Type       string
+	RepeatRule string
+	TriggerAt  time.Time
 }
 
 type queueItem struct {
