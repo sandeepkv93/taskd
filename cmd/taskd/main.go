@@ -1,7 +1,17 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"os"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sandeepkv93/taskd/internal/update"
+)
 
 func main() {
-	fmt.Println("taskd: bootstrap")
+	program := tea.NewProgram(update.NewModel())
+	if _, err := program.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "taskd failed: %v\n", err)
+		os.Exit(1)
+	}
 }
