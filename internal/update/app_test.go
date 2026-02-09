@@ -540,3 +540,41 @@ func TestCommandPaletteUnknownCommandSetsError(t *testing.T) {
 		t.Fatalf("expected structured error text, got %q", next.Status.Text)
 	}
 }
+
+func TestHelpToggleAndContextualBindings(t *testing.T) {
+	m := NewModel()
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	next := updated.(Model)
+	if !next.HelpVisible {
+		t.Fatal("expected help to be visible after toggle")
+	}
+	out := next.View()
+	if !strings.Contains(out, "help:") || !strings.Contains(out, "global:") {
+		t.Fatalf("expected help panel in view output, got %q", out)
+	}
+	if !strings.Contains(out, "today view:") {
+		t.Fatalf("expected today contextual help section, got %q", out)
+	}
+
+	updated, _ = next.Update(SwitchViewMsg{View: ViewInbox})
+	next = updated.(Model)
+	out = next.View()
+	if !strings.Contains(out, "inbox view:") {
+		t.Fatalf("expected inbox contextual help section, got %q", out)
+	}
+	if !strings.Contains(out, "capture inbox item") {
+		t.Fatalf("expected inbox-specific keybinding text, got %q", out)
+	}
+}
+
+func TestViewBindingsExistForAllViews(t *testing.T) {
+	m := NewModel()
+	views := []View{ViewToday, ViewInbox, ViewCalendar, ViewFocus}
+	for _, view := range views {
+		m.CurrentView = view
+		bindings := m.viewBindings()
+		if len(bindings) == 0 {
+			t.Fatalf("expected bindings for view %s", view)
+		}
+	}
+}

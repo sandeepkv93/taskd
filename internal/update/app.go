@@ -61,6 +61,7 @@ type Model struct {
 	ReminderAck    map[string]bool
 	SoftFollowedUp map[string]bool
 	Palette        CommandPaletteState
+	HelpVisible    bool
 	Status         StatusBar
 	Keys           GlobalKeyMap
 	Quitting       bool
@@ -150,6 +151,11 @@ type FocusState struct {
 type CommandPaletteState struct {
 	Active bool
 	Input  string
+}
+
+type KeyBinding struct {
+	Key    string
+	Action string
 }
 
 type SwitchViewMsg struct {
@@ -284,6 +290,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ensureCalendarState()
 
 		if m.Palette.Active {
+			if typed.String() == m.Keys.Help {
+				m.HelpVisible = !m.HelpVisible
+				return m, nil
+			}
 			next := m.handlePaletteKey(typed)
 			return next, nil
 		}
@@ -306,6 +316,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case m.Keys.Focus:
 			m.CurrentView = ViewFocus
 			m.bootstrapFocusTask()
+			return m, nil
+		case m.Keys.Help:
+			m.HelpVisible = !m.HelpVisible
+			if m.HelpVisible {
+				m.Status = StatusBar{Text: "help shown", IsError: false}
+			} else {
+				m.Status = StatusBar{Text: "help hidden", IsError: false}
+			}
 			return m, nil
 		case "ctrl+c", m.Keys.Quit:
 			m.Quitting = true
@@ -420,14 +438,19 @@ func (m Model) View() string {
 	if m.Palette.Active {
 		paletteView = m.renderCommandPalette()
 	}
+	helpView := ""
+	if m.HelpVisible {
+		helpView = m.renderHelpView()
+	}
 	return fmt.Sprintf(
-		"taskd | view: %s | selected: %s\nkeys: [%s]today [%s]inbox [%s]calendar [%s]focus [%s]quit%s%s%s%s%s%s%s",
+		"taskd | view: %s | selected: %s\nkeys: [%s]today [%s]inbox [%s]calendar [%s]focus [%s]help [%s]quit%s%s%s%s%s%s%s%s",
 		m.CurrentView,
 		m.SelectedTaskID,
 		m.Keys.Today,
 		m.Keys.Inbox,
 		m.Keys.Calendar,
 		m.Keys.Focus,
+		m.Keys.Help,
 		m.Keys.Quit,
 		status,
 		inboxView,
@@ -436,6 +459,7 @@ func (m Model) View() string {
 		focusView,
 		reminderView,
 		paletteView,
+		helpView,
 	)
 }
 
@@ -1059,6 +1083,63 @@ func (m Model) executePaletteCommand() Model {
 
 func (m Model) renderCommandPalette() string {
 	return fmt.Sprintf("\ncommand: /%s", m.Palette.Input)
+}
+
+func (m Model) renderHelpView() string {
+	var b strings.Builder
+	b.WriteString("\nhelp:\n")
+	b.WriteString("global:\n")
+	for _, kb := range m.globalBindings() {
+		b.WriteString(fmt.Sprintf("  %-8s %s\n", kb.Key, kb.Action))
+	}
+	b.WriteString(fmt.Sprintf("%s view:\n", strings.ToLower(string(m.CurrentView))))
+	for _, kb := range m.viewBindings() {
+		b.WriteString(fmt.Sprintf("  %-8s %s\n", kb.Key, kb.Action))
+	}
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
+func (m Model) globalBindings() []KeyBinding {
+	return []KeyBinding{
+		{Key: m.Keys.Today, Action: "switch to Today"},
+		{Key: m.Keys.Inbox, Action: "switch to Inbox"},
+		{Key: m.Keys.Calendar, Action: "switch to Calendar"},
+		{Key: m.Keys.Focus, Action: "switch to Focus"},
+		{Key: "/", Action: "open command palette"},
+		{Key: m.Keys.Help, Action: "toggle help panel"},
+		{Key: m.Keys.Quit, Action: "quit app"},
+	}
+}
+
+func (m Model) viewBindings() []KeyBinding {
+	switch m.CurrentView {
+	case ViewInbox:
+		return []KeyBinding{
+			{Key: "enter", Action: "capture inbox item"},
+			{Key: "j/k", Action: "move cursor"},
+			{Key: "space", Action: "toggle select"},
+			{Key: "x/u", Action: "select all / clear selection"},
+			{Key: "s/g", Action: "bulk schedule / bulk tag"},
+		}
+	case ViewToday:
+		return []KeyBinding{
+			{Key: "j/k", Action: "move selection"},
+		}
+	case ViewCalendar:
+		return []KeyBinding{
+			{Key: "d/w/m", Action: "day/week/month mode"},
+			{Key: "h/l", Action: "previous/next period"},
+			{Key: "j/k", Action: "move agenda cursor"},
+		}
+	case ViewFocus:
+		return []KeyBinding{
+			{Key: "space", Action: "start/pause timer"},
+			{Key: "r", Action: "reset timer"},
+			{Key: "n", Action: "next focus phase"},
+		}
+	default:
+		return []KeyBinding{{Key: "-", Action: "no contextual bindings"}}
+	}
 }
 
 func (m *Model) applyReminderBehavior(ev scheduler.ReminderEvent, now time.Time) {
