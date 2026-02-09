@@ -1022,103 +1022,59 @@ func (m *Model) bulkTagInbox(tag string) {
 }
 
 func (m Model) renderInboxView() string {
-	var b strings.Builder
-	b.WriteString("inbox:\n")
-	b.WriteString(m.quickAddInput.View() + "\n")
-	b.WriteString("actions: [enter]add [space]select [x]all [u]clear [s]schedule [g]tag\n")
-	b.WriteString(m.inboxList.View())
-	return strings.TrimSpace(b.String())
+	return views.RenderInboxPanel(views.InboxPanelData{
+		QuickAddView: m.quickAddInput.View(),
+		ListView:     m.inboxList.View(),
+	})
 }
 
 func (m Model) renderTodayView() string {
-	scheduled := make([]TodayItem, 0)
-	anytime := make([]TodayItem, 0)
-	overdue := make([]TodayItem, 0)
+	items := make([]views.TodayItemData, 0, len(m.Today.Items))
 	for _, item := range m.Today.Items {
-		switch item.Bucket {
-		case TodayBucketScheduled:
-			scheduled = append(scheduled, item)
-		case TodayBucketOverdue:
-			overdue = append(overdue, item)
-		default:
-			anytime = append(anytime, item)
-		}
+		items = append(items, views.TodayItemData{
+			ID:          item.ID,
+			Title:       item.Title,
+			Bucket:      string(item.Bucket),
+			ScheduledAt: item.ScheduledAt,
+			DueAt:       item.DueAt,
+			Priority:    item.Priority,
+		})
 	}
-
-	var b strings.Builder
-	b.WriteString("today:\n")
-	b.WriteString("actions: [j/k]move [1]today [2]inbox [3]calendar [4]focus\n")
-	b.WriteString(m.todayList.View() + "\n")
-	renderTodaySection(&b, "Scheduled", scheduled, m.Today)
-	renderTodaySection(&b, "Anytime", anytime, m.Today)
-	renderTodaySection(&b, "Overdue", overdue, m.Today)
-
-	if selected, ok := m.currentTodayItem(); ok {
-		b.WriteString("\nmetadata:\n")
-		b.WriteString(fmt.Sprintf("id: %s\n", selected.ID))
-		b.WriteString(fmt.Sprintf("priority: %s\n", selected.Priority))
-		if len(selected.Tags) > 0 {
-			b.WriteString(fmt.Sprintf("tags: %s\n", strings.Join(selected.Tags, ",")))
-		} else {
-			b.WriteString("tags: -\n")
-		}
-		if selected.ScheduledAt != "" {
-			b.WriteString(fmt.Sprintf("scheduled: %s\n", selected.ScheduledAt))
-		}
-		if selected.DueAt != "" {
-			b.WriteString(fmt.Sprintf("due: %s\n", selected.DueAt))
-		}
-		if selected.Notes != "" {
-			b.WriteString(fmt.Sprintf("notes: %s\n", selected.Notes))
-		}
-	}
-
-	return strings.TrimSpace(b.String())
+	return views.RenderTodayPanel(views.TodayPanelData{
+		ListView:   m.todayList.View(),
+		Items:      items,
+		SelectedID: m.SelectedTaskID,
+	})
 }
 
 func (m Model) renderCalendarView() string {
-	var b strings.Builder
-	b.WriteString("calendar:\n")
-	b.WriteString(fmt.Sprintf("mode: %s | focus: %s\n", m.Calendar.Mode, m.Calendar.FocusDate.Format("2006-01-02")))
-	b.WriteString("actions: [d]day [w]week [m]month [h/l]period [j/k]agenda\n")
-	b.WriteString(m.calendarTable.View() + "\n")
-
-	grouped := make(map[string][]AgendaItem)
-	keys := make([]string, 0)
+	items := make([]views.CalendarAgendaItemData, 0, len(m.Calendar.Items))
 	for _, item := range m.Calendar.Items {
-		if _, ok := grouped[item.Date]; !ok {
-			keys = append(keys, item.Date)
-		}
-		grouped[item.Date] = append(grouped[item.Date], item)
+		items = append(items, views.CalendarAgendaItemData{
+			ID:    item.ID,
+			Title: item.Title,
+			Date:  item.Date,
+			Time:  item.Time,
+			Kind:  item.Kind,
+		})
 	}
-	sort.Strings(keys)
-
-	if len(keys) == 0 {
-		b.WriteString("(agenda empty)")
-		return b.String()
-	}
-
-	for _, day := range keys {
-		b.WriteString(fmt.Sprintf("\n%s:\n", day))
-		items := grouped[day]
-		sort.SliceStable(items, func(i, j int) bool { return items[i].Time < items[j].Time })
-		for _, item := range items {
-			cursor := " "
-			if calendarCursorItem(m.Calendar, item.ID) {
-				cursor = ">"
-			}
-			b.WriteString(fmt.Sprintf("%s [%s] %s %s\n", cursor, strings.ToUpper(item.Kind), item.Time, item.Title))
+	var selected *views.CalendarAgendaItemData
+	if s, ok := m.currentAgendaItem(); ok {
+		selected = &views.CalendarAgendaItemData{
+			ID:    s.ID,
+			Title: s.Title,
+			Date:  s.Date,
+			Time:  s.Time,
+			Kind:  s.Kind,
 		}
 	}
-
-	if selected, ok := m.currentAgendaItem(); ok {
-		b.WriteString("\nagenda-metadata:\n")
-		b.WriteString(fmt.Sprintf("id: %s\n", selected.ID))
-		b.WriteString(fmt.Sprintf("kind: %s\n", selected.Kind))
-		b.WriteString(fmt.Sprintf("when: %s %s\n", selected.Date, selected.Time))
-	}
-
-	return strings.TrimSpace(b.String())
+	return views.RenderCalendarPanel(views.CalendarPanelData{
+		Mode:      string(m.Calendar.Mode),
+		FocusDate: m.Calendar.FocusDate.Format("2006-01-02"),
+		TableView: m.calendarTable.View(),
+		Items:     items,
+		Selected:  selected,
+	})
 }
 
 func (m Model) renderFocusView() string {
@@ -1128,61 +1084,15 @@ func (m Model) renderFocusView() string {
 		progress = float64(total-m.Focus.RemainingSec) / float64(total)
 	}
 
-	var b strings.Builder
-	b.WriteString("focus:\n")
-	if m.Focus.TaskTitle != "" {
-		b.WriteString(fmt.Sprintf("task: %s\n", m.Focus.TaskTitle))
-	} else {
-		b.WriteString("task: (none selected)\n")
-	}
-	b.WriteString(fmt.Sprintf("phase: %s\n", strings.ToUpper(string(m.Focus.Phase))))
-	b.WriteString(fmt.Sprintf("timer: %s\n", formatDuration(m.Focus.RemainingSec)))
-	b.WriteString(fmt.Sprintf("progress: %s %.0f%%\n", m.focusProgress.ViewAs(progress), progress*100))
-	b.WriteString(fmt.Sprintf("pomodoros completed: %d\n", m.Focus.CompletedPomodoros))
-	b.WriteString("actions: [space]start/pause [r]reset [n]next-phase\n")
-	if m.Focus.RemainingSec == 0 {
-		b.WriteString("prompt: session ended, press [n] to continue")
-	}
-	return strings.TrimSpace(b.String())
-}
-
-func renderTodaySection(b *strings.Builder, title string, items []TodayItem, state TodayState) {
-	b.WriteString(fmt.Sprintf("\n%s:\n", title))
-	if len(items) == 0 {
-		b.WriteString("  (none)\n")
-		return
-	}
-	for _, item := range items {
-		cursor := " "
-		if stateCursorItem(state, item.ID) {
-			cursor = ">"
-		}
-		b.WriteString(fmt.Sprintf("%s %s %s", cursor, urgencyBadge(item), item.Title))
-		if item.ScheduledAt != "" {
-			b.WriteString(fmt.Sprintf(" @%s", item.ScheduledAt))
-		}
-		if item.DueAt != "" {
-			b.WriteString(fmt.Sprintf(" due:%s", item.DueAt))
-		}
-		b.WriteString("\n")
-	}
-}
-
-func urgencyBadge(item TodayItem) string {
-	if item.Bucket == TodayBucketOverdue || item.Priority == "Critical" {
-		return "[RED]"
-	}
-	if item.Bucket == TodayBucketScheduled || item.Priority == "High" {
-		return "[YELLOW]"
-	}
-	return "[GREEN]"
-}
-
-func stateCursorItem(state TodayState, id string) bool {
-	if state.Cursor < 0 || state.Cursor >= len(state.Items) {
-		return false
-	}
-	return state.Items[state.Cursor].ID == id
+	return views.RenderFocusPanel(views.FocusPanelData{
+		TaskTitle:          m.Focus.TaskTitle,
+		Phase:              string(m.Focus.Phase),
+		Timer:              formatDuration(m.Focus.RemainingSec),
+		ProgressView:       m.focusProgress.ViewAs(progress),
+		ProgressPct:        int(progress * 100),
+		CompletedPomodoros: m.Focus.CompletedPomodoros,
+		ShowEndPrompt:      m.Focus.RemainingSec == 0,
+	})
 }
 
 func (m *Model) syncSelectedTaskToTodayCursor() {
@@ -1374,10 +1284,7 @@ func (m Model) executePaletteCommand() Model {
 }
 
 func (m Model) renderCommandPalette() string {
-	if !m.Palette.Active {
-		return ""
-	}
-	return fmt.Sprintf("command: /%s", m.Palette.Input)
+	return views.RenderCommandPalette(m.Palette.Active, m.Palette.Input)
 }
 
 func (m Model) renderNotificationsView() string {
@@ -1385,24 +1292,27 @@ func (m Model) renderNotificationsView() string {
 		return ""
 	}
 	n := m.Notifications[len(m.Notifications)-1]
-	return fmt.Sprintf("\nnotification: [%s] %s", strings.ToUpper(n.Level), n.Body)
+	return views.RenderNotification(n.Level, n.Body)
 }
 
 func (m Model) renderProductivityView() string {
 	s := m.Productivity.Signals
-	if s.TemporalDebtScore == 0 && len(s.Suggestions) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	b.WriteString("\nproductivity:\n")
-	b.WriteString(fmt.Sprintf("temporal-debt: %d (%s)\n", s.TemporalDebtScore, s.TemporalDebtLabel))
+	suggestions := make([]views.SuggestionData, 0, len(s.Suggestions))
 	if len(s.Suggestions) > 0 {
-		b.WriteString("suggestions:\n")
 		for _, sg := range s.Suggestions {
-			b.WriteString(fmt.Sprintf("- %s [%s, %dm] %s\n", sg.Title, sg.Energy, sg.Minutes, sg.Reason))
+			suggestions = append(suggestions, views.SuggestionData{
+				Title:   sg.Title,
+				Energy:  sg.Energy,
+				Minutes: sg.Minutes,
+				Reason:  sg.Reason,
+			})
 		}
 	}
-	return strings.TrimSuffix(b.String(), "\n")
+	return views.RenderProductivityPanel(views.ProductivityPanelData{
+		TemporalDebtScore: s.TemporalDebtScore,
+		TemporalDebtLabel: s.TemporalDebtLabel,
+		Suggestions:       suggestions,
+	})
 }
 
 func (m Model) renderHelpIfVisible() string {
@@ -1417,38 +1327,23 @@ func (m Model) renderTodayMetadataPane() string {
 	if !ok {
 		return "metadata:\n(no selection)"
 	}
-	notes := selected.Notes
-	if notes == "" {
-		notes = "_No notes_"
-	}
-	return fmt.Sprintf("metadata:\nid: %s\npriority: %s\ntags: %s\n\nnotes-editor:\n%s\n\nmarkdown-preview:\n%s",
-		selected.ID,
-		selected.Priority,
-		strings.Join(selected.Tags, ","),
-		m.notesArea.View(),
-		m.metaViewport.View(),
-	)
+	return views.RenderTodayMetadataPane(views.TodayMetadataData{
+		SelectedID:       selected.ID,
+		Priority:         selected.Priority,
+		Tags:             selected.Tags,
+		NotesEditorView:  m.notesArea.View(),
+		MarkdownMetaView: m.metaViewport.View(),
+	})
 }
 
 func (m Model) renderRecurrenceEditorIfVisible() string {
-	if !m.recurrenceEditor.Active {
-		return ""
-	}
-	var b strings.Builder
-	b.WriteString("\nrecurrence-editor:\n")
-	b.WriteString("keys: [tab] field [enter] preview [esc] close\n")
-	b.WriteString(fmt.Sprintf("type: %s\n", m.recurrenceEditor.RuleType))
-	b.WriteString(fmt.Sprintf("interval: %s\n", m.recurrenceEditor.IntervalText))
-	if m.recurrenceEditor.Err != "" {
-		b.WriteString("error: " + m.recurrenceEditor.Err + "\n")
-	}
-	if len(m.recurrenceEditor.Preview) > 0 {
-		b.WriteString("preview:\n")
-		for _, item := range m.recurrenceEditor.Preview {
-			b.WriteString("- " + item + "\n")
-		}
-	}
-	return strings.TrimSuffix(b.String(), "\n")
+	return views.RenderRecurrenceEditor(views.RecurrenceEditorData{
+		Active:       m.recurrenceEditor.Active,
+		RuleType:     m.recurrenceEditor.RuleType,
+		IntervalText: m.recurrenceEditor.IntervalText,
+		ErrorText:    m.recurrenceEditor.Err,
+		Preview:      m.recurrenceEditor.Preview,
+	})
 }
 
 func (m Model) handleRecurrenceEditorKey(msg tea.KeyMsg) Model {
@@ -1515,10 +1410,14 @@ func (m Model) renderHelpView() string {
 	for _, kb := range m.viewBindings() {
 		plain = append(plain, fmt.Sprintf("- %s: %s", kb.Key, kb.Action))
 	}
-	return fmt.Sprintf("help:\nglobal:\n%s view:\n%s\n%s", strings.ToLower(string(m.CurrentView)), strings.Join(plain, "\n"), m.helpModel.View(helpKeyMap{
-		short: bindings,
-		full:  [][]key.Binding{bindings},
-	}))
+	return views.RenderHelpPanel(views.HelpPanelData{
+		CurrentView: string(m.CurrentView),
+		Bindings:    plain,
+		HelpView: m.helpModel.View(helpKeyMap{
+			short: bindings,
+			full:  [][]key.Binding{bindings},
+		}),
+	})
 }
 
 func (m Model) globalBindings() []KeyBinding {
@@ -1803,13 +1702,6 @@ func progressBar(progress float64, width int) string {
 		filled = width
 	}
 	return "[" + strings.Repeat("#", filled) + strings.Repeat("-", width-filled) + "]"
-}
-
-func calendarCursorItem(state CalendarState, id string) bool {
-	if state.Cursor < 0 || state.Cursor >= len(state.Items) {
-		return false
-	}
-	return state.Items[state.Cursor].ID == id
 }
 
 func contains(items []string, target string) bool {
