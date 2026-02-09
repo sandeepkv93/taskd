@@ -110,6 +110,7 @@ type InboxState struct {
 	Cursor   int
 	Selected map[string]bool
 	NextID   int
+	CaptureMode bool
 }
 
 type TodayBucket string

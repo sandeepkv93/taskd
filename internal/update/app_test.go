@@ -140,6 +140,39 @@ func TestInboxQuickAddWithKeyboard(t *testing.T) {
 	}
 }
 
+func TestInboxCaptureModeFlow(t *testing.T) {
+	m := NewModel()
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
+	next := updated.(Model)
+	if next.CurrentView != ViewInbox {
+		t.Fatalf("expected inbox view, got %q", next.CurrentView)
+	}
+	if !next.Inbox.CaptureMode {
+		t.Fatal("expected inbox capture mode to be enabled on view enter")
+	}
+
+	for _, r := range []rune("buy milk") {
+		updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		next = updated.(Model)
+	}
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(Model)
+	if len(next.Inbox.Items) != 1 || next.Inbox.Items[0].Title != "buy milk" {
+		t.Fatalf("expected captured task, got %#v", next.Inbox.Items)
+	}
+
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	next = updated.(Model)
+	if next.Inbox.CaptureMode {
+		t.Fatal("expected esc to move inbox to list mode")
+	}
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	next = updated.(Model)
+	if !next.Inbox.CaptureMode {
+		t.Fatal("expected i to re-enter inbox capture mode")
+	}
+}
+
 func TestInboxBulkSelectScheduleAndTag(t *testing.T) {
 	m := NewModel()
 	m.CurrentView = ViewInbox

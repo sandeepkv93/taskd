@@ -11,6 +11,7 @@ import (
 type InboxPanelData struct {
 	QuickAddView string
 	ListView     string
+	CaptureMode  bool
 }
 
 type TodayItemData struct {
@@ -102,7 +103,11 @@ func RenderInboxPanel(data InboxPanelData) string {
 	var b strings.Builder
 	b.WriteString(accentStyle.Render("inbox:") + "\n")
 	b.WriteString(data.QuickAddView + "\n")
-	b.WriteString("actions: [enter]add [space]select [x]all [u]clear [s]schedule [g]tag\n")
+	if data.CaptureMode {
+		b.WriteString("mode: capture | [enter] add task | [esc] list mode\n")
+	} else {
+		b.WriteString("mode: list | [i] capture | [j/k] move | [space] select | [x/u] all/clear | [s/g] schedule/tag\n")
+	}
 	b.WriteString(data.ListView)
 	return strings.TrimSpace(b.String())
 }

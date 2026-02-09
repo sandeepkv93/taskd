@@ -8,11 +8,35 @@ import (
 )
 
 func (m Model) handleInboxKey(msg tea.KeyMsg) Model {
+	if m.Inbox.CaptureMode {
+		switch msg.String() {
+		case "esc":
+			m.Inbox.CaptureMode = false
+			m.quickAddInput.Blur()
+			m.Status = StatusBar{Text: "inbox list mode", IsError: false}
+			return m
+		case "enter":
+			m.addInboxItem(m.quickAddInput.Value())
+			m.quickAddInput.SetValue("")
+			m.Inbox.Input = ""
+			return m
+		}
+		var cmd tea.Cmd
+		m.quickAddInput, cmd = m.quickAddInput.Update(msg)
+		_ = cmd
+		m.Inbox.Input = m.quickAddInput.Value()
+		return m
+	}
+
 	switch msg.String() {
+	case "i":
+		m.Inbox.CaptureMode = true
+		m.quickAddInput.Focus()
+		m.Status = StatusBar{Text: "inbox capture mode", IsError: false}
 	case "enter":
-		m.addInboxItem(m.quickAddInput.Value())
-		m.quickAddInput.SetValue("")
-		m.Inbox.Input = ""
+		m.Inbox.CaptureMode = true
+		m.quickAddInput.Focus()
+		m.Status = StatusBar{Text: "inbox capture mode", IsError: false}
 	case "up", "k":
 		if m.Inbox.Cursor > 0 {
 			m.Inbox.Cursor--
@@ -33,7 +57,9 @@ func (m Model) handleInboxKey(msg tea.KeyMsg) Model {
 		m.bulkTagInbox("triage")
 	default:
 		if msg.Type == tea.KeyRunes {
-			m.quickAddInput.SetValue(m.quickAddInput.Value() + string(msg.Runes))
+			m.Inbox.CaptureMode = true
+			m.quickAddInput.Focus()
+			m.quickAddInput.SetValue(string(msg.Runes))
 			m.Inbox.Input = m.quickAddInput.Value()
 			return m
 		}

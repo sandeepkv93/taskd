@@ -103,8 +103,10 @@ func (m *Model) syncBubbleData() {
 
 	m.quickAddInput.SetValue(m.Inbox.Input)
 	m.commandInput.SetValue(m.Palette.Input)
-	if m.CurrentView == ViewInbox {
+	if m.CurrentView == ViewInbox && m.Inbox.CaptureMode {
 		m.quickAddInput.Focus()
+	} else {
+		m.quickAddInput.Blur()
 	}
 	if m.Palette.Active {
 		m.commandInput.Focus()
@@ -204,6 +206,7 @@ func (m Model) renderInboxView() string {
 	return views.RenderInboxPanel(views.InboxPanelData{
 		QuickAddView: m.quickAddInput.View(),
 		ListView:     m.inboxList.View(),
+		CaptureMode:  m.Inbox.CaptureMode,
 	})
 }
 

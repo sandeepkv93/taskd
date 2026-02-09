@@ -40,7 +40,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return next, nil
 		}
 
-		switch typed.String() {
+		keyStr := typed.String()
+		if m.CurrentView == ViewInbox && m.Inbox.CaptureMode && keyStr != "ctrl+c" &&
+			keyStr != m.Keys.Today && keyStr != m.Keys.Inbox && keyStr != m.Keys.Calendar && keyStr != m.Keys.Focus &&
+			keyStr != m.Keys.Help && keyStr != "/" && keyStr != m.Keys.Quit {
+			return m.handleInboxKey(typed), nil
+		}
+
+		switch keyStr {
 		case "/":
 			m.Palette.Active = true
 			m.Palette.Input = ""
@@ -53,6 +60,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case m.Keys.Inbox:
 			m.CurrentView = ViewInbox
+			m.Inbox.CaptureMode = true
+			m.quickAddInput.Focus()
 			return m, nil
 		case m.Keys.Calendar:
 			m.CurrentView = ViewCalendar
@@ -116,6 +125,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case SwitchViewMsg:
 		if isKnownView(typed.View) {
 			m.CurrentView = typed.View
+			if typed.View == ViewInbox {
+				m.Inbox.CaptureMode = true
+				m.quickAddInput.Focus()
+			}
 			if typed.View == ViewFocus {
 				m.bootstrapFocusTask()
 			}
