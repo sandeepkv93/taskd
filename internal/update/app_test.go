@@ -407,3 +407,67 @@ func TestUpdateReminderDueMsgAppendsLogAndRearms(t *testing.T) {
 		t.Fatalf("expected reminder status text, got %q", next.Status.Text)
 	}
 }
+
+func TestReminderBehaviorHard(t *testing.T) {
+	m := NewModel()
+	ev := scheduler.ReminderEvent{ID: "r-hard", Type: "Hard", TriggerAt: time.Now().UTC()}
+	m.applyReminderBehavior(ev, time.Now().UTC())
+	if !m.Status.IsError {
+		t.Fatal("expected hard reminder status as error")
+	}
+	if !strings.Contains(m.Status.Text, "HARD reminder") {
+		t.Fatalf("unexpected hard status: %q", m.Status.Text)
+	}
+}
+
+func TestReminderBehaviorSoftFollowUpOnce(t *testing.T) {
+	m := NewModel()
+	now := time.Date(2026, 2, 9, 12, 0, 0, 0, time.UTC)
+	ev := scheduler.ReminderEvent{ID: "r-soft", Type: "Soft", TriggerAt: now}
+
+	m.applyReminderBehavior(ev, now)
+	if !m.SoftFollowedUp["r-soft"] {
+		t.Fatal("expected soft reminder to mark follow-up sent")
+	}
+	firstStatus := m.Status.Text
+	m.applyReminderBehavior(ev, now.Add(time.Minute))
+	if m.Status.Text == "" || firstStatus == "" {
+		t.Fatalf("expected non-empty statuses, got first=%q second=%q", firstStatus, m.Status.Text)
+	}
+}
+
+func TestReminderBehaviorNaggingAndAcknowledge(t *testing.T) {
+	m := NewModel()
+	now := time.Date(2026, 2, 9, 12, 0, 0, 0, time.UTC)
+	ev := scheduler.ReminderEvent{ID: "r-nag", Type: "Nagging", TriggerAt: now}
+
+	m.applyReminderBehavior(ev, now)
+	if !strings.Contains(m.Status.Text, "nagging reminder") {
+		t.Fatalf("unexpected nagging status: %q", m.Status.Text)
+	}
+
+	updated, _ := m.Update(AcknowledgeReminderMsg{ID: "r-nag"})
+	next := updated.(Model)
+	if !next.ReminderAck["r-nag"] {
+		t.Fatal("expected reminder ack to be recorded")
+	}
+}
+
+func TestReminderBehaviorContextualWindowAndDeferral(t *testing.T) {
+	m := NewModel()
+	inWindow := time.Date(2026, 2, 9, 19, 0, 0, 0, time.UTC)
+	ev := scheduler.ReminderEvent{ID: "r-ctx", Type: "Contextual", TriggerAt: inWindow}
+	m.applyReminderBehavior(ev, inWindow)
+	if !strings.Contains(m.Status.Text, "contextual reminder") {
+		t.Fatalf("expected contextual reminder status, got %q", m.Status.Text)
+	}
+
+	outWindow := time.Date(2026, 2, 9, 10, 0, 0, 0, time.UTC)
+	m.applyReminderBehavior(ev, outWindow)
+	if !strings.Contains(m.Status.Text, "contextual deferred") {
+		t.Fatalf("expected contextual deferred status, got %q", m.Status.Text)
+	}
+	if nextContextualWindowStart(outWindow).Hour() != 18 {
+		t.Fatalf("expected next contextual start at 18:00, got %s", nextContextualWindowStart(outWindow).Format("15:04"))
+	}
+}

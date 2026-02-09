@@ -57,6 +57,8 @@ type Model struct {
 	Focus          FocusState
 	Scheduler      *scheduler.Engine
 	ReminderLog    []scheduler.ReminderEvent
+	ReminderAck    map[string]bool
+	SoftFollowedUp map[string]bool
 	Status         StatusBar
 	Keys           GlobalKeyMap
 	Quitting       bool
@@ -184,6 +186,10 @@ type ReminderDueMsg struct {
 	Event scheduler.ReminderEvent
 }
 
+type AcknowledgeReminderMsg struct {
+	ID string
+}
+
 func NewModel() Model {
 	return Model{
 		CurrentView: ViewToday,
@@ -237,6 +243,8 @@ func NewModel() Model {
 			RemainingSec:     25 * 60,
 			Phase:            FocusPhaseWork,
 		},
+		ReminderAck:    make(map[string]bool),
+		SoftFollowedUp: make(map[string]bool),
 		Keys: GlobalKeyMap{
 			Today:    "1",
 			Inbox:    "2",
@@ -344,12 +352,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(m.ReminderLog) > 20 {
 			m.ReminderLog = m.ReminderLog[len(m.ReminderLog)-20:]
 		}
-		m.Status = StatusBar{
-			Text:    fmt.Sprintf("reminder fired: %s", typed.Event.ID),
-			IsError: false,
-		}
+		m.applyReminderBehavior(typed.Event, time.Now().UTC())
 		if m.Scheduler != nil {
 			return m, waitForReminderCmd(m.Scheduler.C())
+		}
+		return m, nil
+	case AcknowledgeReminderMsg:
+		if typed.ID != "" {
+			m.ReminderAck[typed.ID] = true
+			m.Status = StatusBar{Text: fmt.Sprintf("reminder acknowledged: %s", typed.ID), IsError: false}
 		}
 		return m, nil
 	}
@@ -935,6 +946,61 @@ func waitForReminderCmd(ch <-chan scheduler.ReminderEvent) tea.Cmd {
 		}
 		return ReminderDueMsg{Event: ev}
 	}
+}
+
+func (m *Model) applyReminderBehavior(ev scheduler.ReminderEvent, now time.Time) {
+	t := strings.ToLower(strings.TrimSpace(ev.Type))
+	switch t {
+	case "hard":
+		m.Status = StatusBar{Text: fmt.Sprintf("HARD reminder: %s", ev.ID), IsError: true}
+	case "soft":
+		m.Status = StatusBar{Text: fmt.Sprintf("soft reminder: %s", ev.ID), IsError: false}
+		if !m.SoftFollowedUp[ev.ID] {
+			m.SoftFollowedUp[ev.ID] = true
+			m.rescheduleReminder(ev, now.Add(10*time.Minute))
+		}
+	case "nagging":
+		m.Status = StatusBar{Text: fmt.Sprintf("nagging reminder: %s", ev.ID), IsError: false}
+		if !m.ReminderAck[ev.ID] {
+			m.rescheduleReminder(ev, now.Add(2*time.Minute))
+		}
+	case "contextual":
+		if inContextualWindow(now) {
+			m.Status = StatusBar{Text: fmt.Sprintf("contextual reminder: %s", ev.ID), IsError: false}
+		} else {
+			next := nextContextualWindowStart(now)
+			m.Status = StatusBar{Text: fmt.Sprintf("contextual deferred: %s -> %s", ev.ID, next.Format("15:04")), IsError: false}
+			m.rescheduleReminder(ev, next)
+		}
+	default:
+		m.Status = StatusBar{Text: fmt.Sprintf("reminder fired: %s", ev.ID), IsError: false}
+	}
+}
+
+func (m *Model) rescheduleReminder(ev scheduler.ReminderEvent, next time.Time) {
+	if m.Scheduler == nil {
+		return
+	}
+	nextEv := ev
+	nextEv.TriggerAt = next
+	if err := m.Scheduler.Schedule(nextEv); err != nil {
+		m.Status = StatusBar{Text: fmt.Sprintf("reminder reschedule failed: %v", err), IsError: true}
+	}
+}
+
+func inContextualWindow(now time.Time) bool {
+	h := now.Hour()
+	return h >= 18 && h < 22
+}
+
+func nextContextualWindowStart(now time.Time) time.Time {
+	y, mo, d := now.Date()
+	loc := now.Location()
+	todayStart := time.Date(y, mo, d, 18, 0, 0, 0, loc)
+	if now.Before(todayStart) {
+		return todayStart
+	}
+	return todayStart.AddDate(0, 0, 1)
 }
 
 func formatDuration(totalSec int) string {
