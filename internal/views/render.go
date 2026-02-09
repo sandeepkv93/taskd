@@ -17,16 +17,18 @@ type AppData struct {
 }
 
 var (
-	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
+	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("27")).Padding(0, 1)
 	statusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
-	errorStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
+	errorStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true)
 	panelStyle  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
 	footerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	leftStyle   = panelStyle.Width(46)
+	rightStyle  = panelStyle.Width(46)
 )
 
 func RenderApp(data AppData) string {
-	left := panelStyle.Width(58).Render(data.LeftPane)
-	right := panelStyle.Width(58).Render(data.RightPane)
+	left := leftStyle.Render(data.LeftPane)
+	right := rightStyle.Render(data.RightPane)
 	row := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 
 	status := statusStyle.Render(data.StatusLine)

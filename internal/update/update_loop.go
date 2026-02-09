@@ -228,7 +228,7 @@ func (m Model) View() string {
 		RightPane:    rightPane,
 		StatusLine:   status,
 		Notification: notificationView,
-		Footer:       fmt.Sprintf("keys: %s today | %s inbox | %s calendar | %s focus | %s help | %s quit", m.Keys.Today, m.Keys.Inbox, m.Keys.Calendar, m.Keys.Focus, m.Keys.Help, m.Keys.Quit),
+		Footer:       fmt.Sprintf("keys: %s today | %s inbox | %s cal | %s focus | / cmd | %s help | %s quit", m.Keys.Today, m.Keys.Inbox, m.Keys.Calendar, m.Keys.Focus, m.Keys.Help, m.Keys.Quit),
 	})
 }
 

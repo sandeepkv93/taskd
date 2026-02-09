@@ -95,11 +95,12 @@ var (
 	cardStyle          = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1).MarginRight(1)
 	subtleStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	focusTimerStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("11"))
+	accentStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true)
 )
 
 func RenderInboxPanel(data InboxPanelData) string {
 	var b strings.Builder
-	b.WriteString("inbox:\n")
+	b.WriteString(accentStyle.Render("inbox:") + "\n")
 	b.WriteString(data.QuickAddView + "\n")
 	b.WriteString("actions: [enter]add [space]select [x]all [u]clear [s]schedule [g]tag\n")
 	b.WriteString(data.ListView)
@@ -122,7 +123,7 @@ func RenderTodayPanel(data TodayPanelData) string {
 	}
 
 	var b strings.Builder
-	b.WriteString("today:\n")
+	b.WriteString(accentStyle.Render("today:") + "\n")
 	b.WriteString("actions: [j/k]move [z]collapse [1]today [2]inbox [3]calendar [4]focus\n")
 	b.WriteString(data.ListView + "\n")
 
@@ -130,22 +131,22 @@ func RenderTodayPanel(data TodayPanelData) string {
 	anytimeBlock := renderTodaySection("Anytime", anytime, data.SelectedID, data.Collapsed["Anytime"])
 	overdueBlock := renderTodaySection("Overdue", overdue, data.SelectedID, data.Collapsed["Overdue"])
 
-	row := lipgloss.JoinHorizontal(
+	topRow := lipgloss.JoinHorizontal(
 		lipgloss.Top,
-		cardStyle.Width(34).Render(scheduledBlock),
-		cardStyle.Width(34).Render(anytimeBlock),
-		cardStyle.Width(34).Render(overdueBlock),
+		cardStyle.Width(20).Render(scheduledBlock),
+		cardStyle.Width(20).Render(anytimeBlock),
 	)
-	b.WriteString(row)
+	b.WriteString(topRow + "\n")
+	b.WriteString(cardStyle.Width(42).Render(overdueBlock))
 	return strings.TrimSpace(b.String())
 }
 
 func RenderCalendarPanel(data CalendarPanelData) string {
 	var b strings.Builder
-	b.WriteString("calendar:\n")
+	b.WriteString(accentStyle.Render("calendar:") + "\n")
 	b.WriteString(fmt.Sprintf("mode: %s | focus: %s\n", data.Mode, data.FocusDate))
 	b.WriteString("actions: [d]day [w]week [m]month [h/l]period [j/k]agenda\n")
-	b.WriteString(data.TableView + "\n")
+	b.WriteString(cardStyle.Width(42).Render(data.TableView) + "\n")
 
 	grouped := make(map[string][]CalendarAgendaItemData)
 	keys := make([]string, 0)
@@ -185,24 +186,20 @@ func RenderCalendarPanel(data CalendarPanelData) string {
 		))
 	}
 
-	grid := lipgloss.JoinHorizontal(
-		lipgloss.Top,
-		cardStyle.Width(70).Render(strings.TrimSpace(agenda.String())),
-		cardStyle.Width(34).Render(rightMeta),
-	)
-	b.WriteString(grid)
+	b.WriteString(cardStyle.Width(42).Render(strings.TrimSpace(agenda.String())) + "\n")
+	b.WriteString(cardStyle.Width(42).Render(rightMeta))
 	return strings.TrimSpace(b.String())
 }
 
 func RenderFocusPanel(data FocusPanelData) string {
 	var b strings.Builder
-	b.WriteString("focus:\n")
+	b.WriteString(accentStyle.Render("focus:") + "\n")
 	if data.TaskTitle != "" {
 		b.WriteString(fmt.Sprintf("task: %s\n", data.TaskTitle))
 	} else {
 		b.WriteString("task: (none selected)\n")
 	}
-	timerCard := cardStyle.Width(44).Render(strings.TrimSpace(fmt.Sprintf(
+	timerCard := cardStyle.Width(42).Render(strings.TrimSpace(fmt.Sprintf(
 		"%s\n%s\n%s\n%s",
 		sectionHeaderStyle.Render("phase: "+strings.ToUpper(data.Phase)),
 		focusTimerStyle.Render("timer: "+data.Timer),
@@ -221,7 +218,7 @@ func RenderCommandPalette(active bool, input string) string {
 	if !active {
 		return ""
 	}
-	return fmt.Sprintf("command: /%s", input)
+	return cardStyle.Width(42).Render(fmt.Sprintf("command palette\n/%s", input))
 }
 
 func RenderNotification(level string, body string) string {
@@ -240,20 +237,24 @@ func RenderProductivityPanel(data ProductivityPanelData) string {
 	b.WriteString(fmt.Sprintf("temporal-debt: %d (%s)\n", data.TemporalDebtScore, data.TemporalDebtLabel))
 	if len(data.Suggestions) > 0 {
 		b.WriteString("suggestions:\n")
-		for _, sg := range data.Suggestions {
-			b.WriteString(fmt.Sprintf("- %s [%s, %dm] %s\n", sg.Title, sg.Energy, sg.Minutes, sg.Reason))
+		for i, sg := range data.Suggestions {
+			if i >= 2 {
+				b.WriteString(fmt.Sprintf("- +%d more…\n", len(data.Suggestions)-i))
+				break
+			}
+			b.WriteString(fmt.Sprintf("- %s [%s, %dm]\n", sg.Title, sg.Energy, sg.Minutes))
 		}
 	}
 	return strings.TrimSuffix(b.String(), "\n")
 }
 
 func RenderHelpPanel(data HelpPanelData) string {
-	left := cardStyle.Width(40).Render(fmt.Sprintf("help:\nglobal:\n%s view:\n%s",
+	left := cardStyle.Width(42).Render(fmt.Sprintf("help:\nglobal:\n%s view:\n%s",
 		strings.ToLower(data.CurrentView),
 		strings.Join(data.Bindings, "\n"),
 	))
-	right := cardStyle.Width(70).Render(data.HelpView)
-	return lipgloss.JoinHorizontal(lipgloss.Top, left, right)
+	right := cardStyle.Width(42).Render(data.HelpView)
+	return strings.TrimSpace(left + "\n" + right)
 }
 
 func RenderTodayMetadataPane(data TodayMetadataData) string {
