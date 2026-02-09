@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 type InboxPanelData struct {
@@ -88,6 +90,13 @@ type RecurrenceEditorData struct {
 	Preview      []string
 }
 
+var (
+	sectionHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("14"))
+	cardStyle          = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1).MarginRight(1)
+	subtleStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	focusTimerStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("11"))
+)
+
 func RenderInboxPanel(data InboxPanelData) string {
 	var b strings.Builder
 	b.WriteString("inbox:\n")
@@ -116,9 +125,18 @@ func RenderTodayPanel(data TodayPanelData) string {
 	b.WriteString("today:\n")
 	b.WriteString("actions: [j/k]move [z]collapse [1]today [2]inbox [3]calendar [4]focus\n")
 	b.WriteString(data.ListView + "\n")
-	renderTodaySection(&b, "Scheduled", scheduled, data.SelectedID, data.Collapsed["Scheduled"])
-	renderTodaySection(&b, "Anytime", anytime, data.SelectedID, data.Collapsed["Anytime"])
-	renderTodaySection(&b, "Overdue", overdue, data.SelectedID, data.Collapsed["Overdue"])
+
+	scheduledBlock := renderTodaySection("Scheduled", scheduled, data.SelectedID, data.Collapsed["Scheduled"])
+	anytimeBlock := renderTodaySection("Anytime", anytime, data.SelectedID, data.Collapsed["Anytime"])
+	overdueBlock := renderTodaySection("Overdue", overdue, data.SelectedID, data.Collapsed["Overdue"])
+
+	row := lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		cardStyle.Width(34).Render(scheduledBlock),
+		cardStyle.Width(34).Render(anytimeBlock),
+		cardStyle.Width(34).Render(overdueBlock),
+	)
+	b.WriteString(row)
 	return strings.TrimSpace(b.String())
 }
 
@@ -143,8 +161,9 @@ func RenderCalendarPanel(data CalendarPanelData) string {
 		return b.String()
 	}
 
+	var agenda strings.Builder
 	for _, day := range keys {
-		b.WriteString(fmt.Sprintf("\n%s:\n", day))
+		agenda.WriteString(fmt.Sprintf("\n%s:\n", day))
 		items := grouped[day]
 		sort.SliceStable(items, func(i, j int) bool { return items[i].Time < items[j].Time })
 		for _, item := range items {
@@ -152,16 +171,26 @@ func RenderCalendarPanel(data CalendarPanelData) string {
 			if data.Selected != nil && data.Selected.ID == item.ID {
 				cursor = ">"
 			}
-			b.WriteString(fmt.Sprintf("%s [%s] %s %s\n", cursor, strings.ToUpper(item.Kind), item.Time, item.Title))
+			agenda.WriteString(fmt.Sprintf("%s [%s] %s %s\n", cursor, strings.ToUpper(item.Kind), item.Time, item.Title))
 		}
 	}
 
+	rightMeta := "agenda-metadata:\n(no selection)"
 	if data.Selected != nil {
-		b.WriteString("\nagenda-metadata:\n")
-		b.WriteString(fmt.Sprintf("id: %s\n", data.Selected.ID))
-		b.WriteString(fmt.Sprintf("kind: %s\n", data.Selected.Kind))
-		b.WriteString(fmt.Sprintf("when: %s %s\n", data.Selected.Date, data.Selected.Time))
+		rightMeta = strings.TrimSpace(fmt.Sprintf("agenda-metadata:\nid: %s\nkind: %s\nwhen: %s %s\n",
+			data.Selected.ID,
+			data.Selected.Kind,
+			data.Selected.Date,
+			data.Selected.Time,
+		))
 	}
+
+	grid := lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		cardStyle.Width(70).Render(strings.TrimSpace(agenda.String())),
+		cardStyle.Width(34).Render(rightMeta),
+	)
+	b.WriteString(grid)
 	return strings.TrimSpace(b.String())
 }
 
@@ -173,10 +202,14 @@ func RenderFocusPanel(data FocusPanelData) string {
 	} else {
 		b.WriteString("task: (none selected)\n")
 	}
-	b.WriteString(fmt.Sprintf("phase: %s\n", strings.ToUpper(data.Phase)))
-	b.WriteString(fmt.Sprintf("timer: %s\n", data.Timer))
-	b.WriteString(fmt.Sprintf("progress: %s %d%%\n", data.ProgressView, data.ProgressPct))
-	b.WriteString(fmt.Sprintf("pomodoros completed: %d\n", data.CompletedPomodoros))
+	timerCard := cardStyle.Width(44).Render(strings.TrimSpace(fmt.Sprintf(
+		"%s\n%s\n%s\n%s",
+		sectionHeaderStyle.Render("phase: "+strings.ToUpper(data.Phase)),
+		focusTimerStyle.Render("timer: "+data.Timer),
+		"progress: "+data.ProgressView+fmt.Sprintf(" %d%%", data.ProgressPct),
+		subtleStyle.Render(fmt.Sprintf("pomodoros completed: %d", data.CompletedPomodoros)),
+	)))
+	b.WriteString(timerCard + "\n")
 	b.WriteString("actions: [space]start/pause [r]reset [n]next-phase\n")
 	if data.ShowEndPrompt {
 		b.WriteString("prompt: session ended, press [n] to continue")
@@ -215,11 +248,12 @@ func RenderProductivityPanel(data ProductivityPanelData) string {
 }
 
 func RenderHelpPanel(data HelpPanelData) string {
-	return fmt.Sprintf("help:\nglobal:\n%s view:\n%s\n%s",
+	left := cardStyle.Width(40).Render(fmt.Sprintf("help:\nglobal:\n%s view:\n%s",
 		strings.ToLower(data.CurrentView),
 		strings.Join(data.Bindings, "\n"),
-		data.HelpView,
-	)
+	))
+	right := cardStyle.Width(70).Render(data.HelpView)
+	return lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 }
 
 func RenderTodayMetadataPane(data TodayMetadataData) string {
@@ -257,19 +291,21 @@ func RenderRecurrenceEditor(data RecurrenceEditorData) string {
 	return strings.TrimSuffix(b.String(), "\n")
 }
 
-func renderTodaySection(b *strings.Builder, title string, items []TodayItemData, selectedID string, collapsed bool) {
+func renderTodaySection(title string, items []TodayItemData, selectedID string, collapsed bool) string {
+	var b strings.Builder
 	marker := "[-]"
 	if collapsed {
 		marker = "[+]"
 	}
-	b.WriteString(fmt.Sprintf("\n%s %s:\n", marker, title))
+	b.WriteString(sectionHeaderStyle.Render(fmt.Sprintf("%s %s:", marker, title)))
+	b.WriteString("\n")
 	if collapsed {
 		b.WriteString("  (collapsed)\n")
-		return
+		return strings.TrimSpace(b.String())
 	}
 	if len(items) == 0 {
 		b.WriteString("  (none)\n")
-		return
+		return strings.TrimSpace(b.String())
 	}
 	for _, item := range items {
 		cursor := " "
@@ -285,6 +321,7 @@ func renderTodaySection(b *strings.Builder, title string, items []TodayItemData,
 		}
 		b.WriteString("\n")
 	}
+	return strings.TrimSpace(b.String())
 }
 
 func urgencyBadge(item TodayItemData) string {
