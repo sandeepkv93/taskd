@@ -338,12 +338,29 @@ func NewModelWithScheduler(engine *scheduler.Engine) Model {
 }
 
 func NewModelWithRuntime(engine *scheduler.Engine, desktopEnabled bool, notifier DesktopNotifier) Model {
+	cfg := DefaultRuntimeConfig()
+	cfg.DesktopNotifications = desktopEnabled
+	return NewModelWithConfig(engine, notifier, cfg)
+}
+
+func NewModelWithConfig(engine *scheduler.Engine, notifier DesktopNotifier, cfg RuntimeConfig) Model {
 	m := NewModel()
 	m.Scheduler = engine
-	m.DesktopEnabled = desktopEnabled
+	m.DesktopEnabled = cfg.DesktopNotifications
 	if notifier != nil {
 		m.notifier = notifier
 	}
+	if cfg.FocusWorkMinutes > 0 {
+		m.Focus.WorkDurationSec = cfg.FocusWorkMinutes * 60
+	}
+	if cfg.FocusBreakMinutes > 0 {
+		m.Focus.BreakDurationSec = cfg.FocusBreakMinutes * 60
+	}
+	m.Focus.RemainingSec = m.Focus.WorkDurationSec
+	if cfg.ProductivityAvailableMins > 0 {
+		m.Productivity.AvailableMinutes = cfg.ProductivityAvailableMins
+	}
+	m.refreshProductivitySignals()
 	return m
 }
 

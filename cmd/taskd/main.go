@@ -10,14 +10,16 @@ import (
 )
 
 func main() {
-	reminderEngine := scheduler.NewEngine(64)
+	cfg := update.RuntimeConfigFromEnv(update.DefaultRuntimeConfig())
+
+	reminderEngine := scheduler.NewEngine(cfg.SchedulerBuffer)
 	reminderEngine.Start()
 	defer reminderEngine.Stop()
 
-	program := tea.NewProgram(update.NewModelWithRuntime(
+	program := tea.NewProgram(update.NewModelWithConfig(
 		reminderEngine,
-		update.DesktopNotificationsEnabledFromEnv(),
 		update.ExecDesktopNotifier{},
+		cfg,
 	))
 	if _, err := program.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "taskd failed: %v\n", err)
