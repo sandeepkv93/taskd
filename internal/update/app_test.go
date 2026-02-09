@@ -153,3 +153,61 @@ func TestInboxBulkSelectScheduleAndTag(t *testing.T) {
 		}
 	}
 }
+
+func TestTodayViewRendersGroupedSectionsAndMetadata(t *testing.T) {
+	m := NewModel()
+	m.CurrentView = ViewToday
+	m.Today.Items = []TodayItem{
+		{ID: "a", Title: "sched", Bucket: TodayBucketScheduled, ScheduledAt: "10:00", Priority: "High", Tags: []string{"team"}, Notes: "note-a"},
+		{ID: "b", Title: "any", Bucket: TodayBucketAnytime, Priority: "Low", Notes: "note-b"},
+		{ID: "c", Title: "late", Bucket: TodayBucketOverdue, DueAt: "Yesterday", Priority: "Critical", Notes: "note-c"},
+	}
+	m.Today.Cursor = 2
+	m.syncSelectedTaskToTodayCursor()
+
+	out := m.View()
+	if !strings.Contains(out, "Scheduled:") || !strings.Contains(out, "Anytime:") || !strings.Contains(out, "Overdue:") {
+		t.Fatalf("missing grouped sections in today view: %q", out)
+	}
+	if !strings.Contains(out, "[YELLOW] sched") {
+		t.Fatalf("missing scheduled urgency marker: %q", out)
+	}
+	if !strings.Contains(out, "[GREEN] any") {
+		t.Fatalf("missing anytime urgency marker: %q", out)
+	}
+	if !strings.Contains(out, "[RED] late") {
+		t.Fatalf("missing overdue urgency marker: %q", out)
+	}
+	if !strings.Contains(out, "metadata:") || !strings.Contains(out, "id: c") {
+		t.Fatalf("missing metadata pane for selected item: %q", out)
+	}
+}
+
+func TestTodayKeyNavigationUpdatesSelection(t *testing.T) {
+	m := NewModel()
+	m.CurrentView = ViewToday
+	m.Today.Items = []TodayItem{
+		{ID: "first", Title: "A", Bucket: TodayBucketAnytime, Priority: "Low"},
+		{ID: "second", Title: "B", Bucket: TodayBucketScheduled, Priority: "High"},
+	}
+	m.Today.Cursor = 0
+	m.syncSelectedTaskToTodayCursor()
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	next := updated.(Model)
+	if next.Today.Cursor != 1 {
+		t.Fatalf("expected cursor at 1, got %d", next.Today.Cursor)
+	}
+	if next.SelectedTaskID != "second" {
+		t.Fatalf("expected selected task second, got %q", next.SelectedTaskID)
+	}
+
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	next = updated.(Model)
+	if next.Today.Cursor != 0 {
+		t.Fatalf("expected cursor at 0, got %d", next.Today.Cursor)
+	}
+	if next.SelectedTaskID != "first" {
+		t.Fatalf("expected selected task first, got %q", next.SelectedTaskID)
+	}
+}

@@ -49,6 +49,7 @@ type Model struct {
 	Filter         FilterState
 	Sort           SortOrder
 	Inbox          InboxState
+	Today          TodayState
 	Status         StatusBar
 	Keys           GlobalKeyMap
 	Quitting       bool
@@ -68,6 +69,30 @@ type InboxState struct {
 	Cursor   int
 	Selected map[string]bool
 	NextID   int
+}
+
+type TodayBucket string
+
+const (
+	TodayBucketScheduled TodayBucket = "Scheduled"
+	TodayBucketAnytime   TodayBucket = "Anytime"
+	TodayBucketOverdue   TodayBucket = "Overdue"
+)
+
+type TodayItem struct {
+	ID          string
+	Title       string
+	Bucket      TodayBucket
+	ScheduledAt string
+	DueAt       string
+	Priority    string
+	Tags        []string
+	Notes       string
+}
+
+type TodayState struct {
+	Items  []TodayItem
+	Cursor int
 }
 
 type SwitchViewMsg struct {
@@ -97,6 +122,10 @@ type BulkTagInboxMsg struct {
 	Tag string
 }
 
+type SetTodayItemsMsg struct {
+	Items []TodayItem
+}
+
 func NewModel() Model {
 	return Model{
 		CurrentView: ViewToday,
@@ -104,6 +133,36 @@ func NewModel() Model {
 		Inbox: InboxState{
 			Selected: make(map[string]bool),
 			NextID:   1,
+		},
+		Today: TodayState{
+			Items: []TodayItem{
+				{
+					ID:          "today-1",
+					Title:       "Daily standup",
+					Bucket:      TodayBucketScheduled,
+					ScheduledAt: "09:30",
+					Priority:    "High",
+					Tags:        []string{"team"},
+					Notes:       "Share blockers and plan.",
+				},
+				{
+					ID:       "today-2",
+					Title:    "Review pull request",
+					Bucket:   TodayBucketAnytime,
+					Priority: "Medium",
+					Tags:     []string{"code"},
+					Notes:    "Check tests and architecture changes.",
+				},
+				{
+					ID:       "today-3",
+					Title:    "Submit tax docs",
+					Bucket:   TodayBucketOverdue,
+					DueAt:    "Yesterday",
+					Priority: "Critical",
+					Tags:     []string{"finance"},
+					Notes:    "Overdue since yesterday evening.",
+				},
+			},
 		},
 		Keys: GlobalKeyMap{
 			Today:    "1",
@@ -124,6 +183,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch typed := msg.(type) {
 	case tea.KeyMsg:
 		m.ensureInboxState()
+		m.ensureTodayState()
 		switch typed.String() {
 		case m.Keys.Today:
 			m.CurrentView = ViewToday
@@ -143,6 +203,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.CurrentView == ViewInbox {
 			return m.handleInboxKey(typed), nil
+		}
+		if m.CurrentView == ViewToday {
+			return m.handleTodayKey(typed), nil
 		}
 	case SwitchViewMsg:
 		if isKnownView(typed.View) {
@@ -170,6 +233,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case BulkTagInboxMsg:
 		m.bulkTagInbox(typed.Tag)
 		return m, nil
+	case SetTodayItemsMsg:
+		m.Today.Items = typed.Items
+		m.Today.Cursor = 0
+		m.syncSelectedTaskToTodayCursor()
+		return m, nil
 	}
 
 	return m, nil
@@ -188,8 +256,12 @@ func (m Model) View() string {
 	if m.CurrentView == ViewInbox {
 		inboxView = m.renderInboxView()
 	}
+	todayView := ""
+	if m.CurrentView == ViewToday {
+		todayView = m.renderTodayView()
+	}
 	return fmt.Sprintf(
-		"taskd | view: %s | selected: %s\nkeys: [%s]today [%s]inbox [%s]calendar [%s]focus [%s]quit%s%s",
+		"taskd | view: %s | selected: %s\nkeys: [%s]today [%s]inbox [%s]calendar [%s]focus [%s]quit%s%s%s",
 		m.CurrentView,
 		m.SelectedTaskID,
 		m.Keys.Today,
@@ -199,6 +271,7 @@ func (m Model) View() string {
 		m.Keys.Quit,
 		status,
 		inboxView,
+		todayView,
 	)
 }
 
@@ -217,6 +290,18 @@ func (m *Model) ensureInboxState() {
 	}
 	if m.Inbox.NextID <= 0 {
 		m.Inbox.NextID = 1
+	}
+}
+
+func (m *Model) ensureTodayState() {
+	if m.Today.Cursor < 0 {
+		m.Today.Cursor = 0
+	}
+	if m.Today.Cursor >= len(m.Today.Items) && len(m.Today.Items) > 0 {
+		m.Today.Cursor = len(m.Today.Items) - 1
+	}
+	if len(m.Today.Items) > 0 && m.SelectedTaskID == "" {
+		m.syncSelectedTaskToTodayCursor()
 	}
 }
 
@@ -250,6 +335,22 @@ func (m Model) handleInboxKey(msg tea.KeyMsg) Model {
 		if msg.Type == tea.KeyRunes {
 			m.Inbox.Input += string(msg.Runes)
 		}
+	}
+	return m
+}
+
+func (m Model) handleTodayKey(msg tea.KeyMsg) Model {
+	switch msg.String() {
+	case "up", "k":
+		if m.Today.Cursor > 0 {
+			m.Today.Cursor--
+		}
+		m.syncSelectedTaskToTodayCursor()
+	case "down", "j":
+		if m.Today.Cursor < len(m.Today.Items)-1 {
+			m.Today.Cursor++
+		}
+		m.syncSelectedTaskToTodayCursor()
 	}
 	return m
 }
@@ -358,6 +459,106 @@ func (m Model) renderInboxView() string {
 		b.WriteString(fmt.Sprintf("%s[%s] %s%s%s\n", cursor, selected, item.Title, scheduled, tags))
 	}
 	return strings.TrimSuffix(b.String(), "\n")
+}
+
+func (m Model) renderTodayView() string {
+	scheduled := make([]TodayItem, 0)
+	anytime := make([]TodayItem, 0)
+	overdue := make([]TodayItem, 0)
+	for _, item := range m.Today.Items {
+		switch item.Bucket {
+		case TodayBucketScheduled:
+			scheduled = append(scheduled, item)
+		case TodayBucketOverdue:
+			overdue = append(overdue, item)
+		default:
+			anytime = append(anytime, item)
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString("\ntoday:\n")
+	b.WriteString("actions: [j/k]move [1]today [2]inbox [3]calendar [4]focus\n")
+	renderTodaySection(&b, "Scheduled", scheduled, m.Today)
+	renderTodaySection(&b, "Anytime", anytime, m.Today)
+	renderTodaySection(&b, "Overdue", overdue, m.Today)
+
+	if selected, ok := m.currentTodayItem(); ok {
+		b.WriteString("\nmetadata:\n")
+		b.WriteString(fmt.Sprintf("id: %s\n", selected.ID))
+		b.WriteString(fmt.Sprintf("priority: %s\n", selected.Priority))
+		if len(selected.Tags) > 0 {
+			b.WriteString(fmt.Sprintf("tags: %s\n", strings.Join(selected.Tags, ",")))
+		} else {
+			b.WriteString("tags: -\n")
+		}
+		if selected.ScheduledAt != "" {
+			b.WriteString(fmt.Sprintf("scheduled: %s\n", selected.ScheduledAt))
+		}
+		if selected.DueAt != "" {
+			b.WriteString(fmt.Sprintf("due: %s\n", selected.DueAt))
+		}
+		if selected.Notes != "" {
+			b.WriteString(fmt.Sprintf("notes: %s\n", selected.Notes))
+		}
+	}
+
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
+func renderTodaySection(b *strings.Builder, title string, items []TodayItem, state TodayState) {
+	b.WriteString(fmt.Sprintf("\n%s:\n", title))
+	if len(items) == 0 {
+		b.WriteString("  (none)\n")
+		return
+	}
+	for _, item := range items {
+		cursor := " "
+		if stateCursorItem(state, item.ID) {
+			cursor = ">"
+		}
+		b.WriteString(fmt.Sprintf("%s %s %s", cursor, urgencyBadge(item), item.Title))
+		if item.ScheduledAt != "" {
+			b.WriteString(fmt.Sprintf(" @%s", item.ScheduledAt))
+		}
+		if item.DueAt != "" {
+			b.WriteString(fmt.Sprintf(" due:%s", item.DueAt))
+		}
+		b.WriteString("\n")
+	}
+}
+
+func urgencyBadge(item TodayItem) string {
+	if item.Bucket == TodayBucketOverdue || item.Priority == "Critical" {
+		return "[RED]"
+	}
+	if item.Bucket == TodayBucketScheduled || item.Priority == "High" {
+		return "[YELLOW]"
+	}
+	return "[GREEN]"
+}
+
+func stateCursorItem(state TodayState, id string) bool {
+	if state.Cursor < 0 || state.Cursor >= len(state.Items) {
+		return false
+	}
+	return state.Items[state.Cursor].ID == id
+}
+
+func (m *Model) syncSelectedTaskToTodayCursor() {
+	if selected, ok := m.currentTodayItem(); ok {
+		m.SelectedTaskID = selected.ID
+	}
+}
+
+func (m Model) currentTodayItem() (TodayItem, bool) {
+	if len(m.Today.Items) == 0 {
+		return TodayItem{}, false
+	}
+	if m.Today.Cursor < 0 || m.Today.Cursor >= len(m.Today.Items) {
+		return TodayItem{}, false
+	}
+	return m.Today.Items[m.Today.Cursor], true
 }
 
 func contains(items []string, target string) bool {
